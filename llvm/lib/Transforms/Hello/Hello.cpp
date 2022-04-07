@@ -6,8 +6,7 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// This file implements two versions of the LLVM "Hello World" pass described
-// in docs/WritingAnLLVMPass.html
+// This file implements two versions of the LLVM "Hello World" pass described // in docs/WritingAnLLVMPass.html
 //
 //===----------------------------------------------------------------------===//
 
@@ -23,13 +22,14 @@ STATISTIC(HelloCounter, "Counts number of functions greeted");
 
 namespace {
   // Hello - The first implementation, without getAnalysisUsage.
-  struct Hello : public FunctionPass {
+  struct Hello : public FunctionPass { // this is the pass itself
+    // subclass of FunctionPass, which works on a function at a time
     static char ID; // Pass identification, replacement for typeid
-    Hello() : FunctionPass(ID) {}
+    Hello() : FunctionPass(ID) {} // constructor
 
-    bool runOnFunction(Function &F) override {
+    bool runOnFunction(Function &F) override { // override virtual method of runOnFunction in FunctionPass
       ++HelloCounter;
-      errs() << "Hello: ";
+      errs() << "Kevin test Hello1: ";
       errs().write_escaped(F.getName()) << '\n';
       return false;
     }
@@ -37,6 +37,7 @@ namespace {
 }
 
 char Hello::ID = 0;
+// register our pass. hello is cmdline arg, Hello World Pass is the pass name
 static RegisterPass<Hello> X("hello", "Hello World Pass");
 
 namespace {
@@ -47,7 +48,7 @@ namespace {
 
     bool runOnFunction(Function &F) override {
       ++HelloCounter;
-      errs() << "Hello: ";
+      errs() << "Kevin test Hello2: ";
       errs().write_escaped(F.getName()) << '\n';
       return false;
     }
