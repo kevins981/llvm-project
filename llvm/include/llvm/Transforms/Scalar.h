@@ -133,7 +133,8 @@ Pass *createIndVarSimplifyPass();
 //
 Pass *createLICMPass();
 Pass *createLICMPass(unsigned LicmMssaOptCap,
-                     unsigned LicmMssaNoAccForPromotionCap);
+                     unsigned LicmMssaNoAccForPromotionCap,
+                     bool AllowSpeculation);
 
 //===----------------------------------------------------------------------===//
 //
@@ -252,6 +253,14 @@ FunctionPass *createReassociatePass();
 //
 FunctionPass *createJumpThreadingPass(bool FreezeSelectCond = false,
                                       int Threshold = -1);
+
+//===----------------------------------------------------------------------===//
+//
+// DFAJumpThreading - When a switch statement inside a loop is used to
+// implement a deterministic finite automata we can jump thread the switch
+// statement reducing number of conditional jumps.
+//
+FunctionPass *createDFAJumpThreadingPass();
 
 //===----------------------------------------------------------------------===//
 //
@@ -417,6 +426,12 @@ extern char &InferAddressSpacesID;
 // LowerExpectIntrinsics - Removes llvm.expect intrinsics and creates
 // "block_weights" metadata.
 FunctionPass *createLowerExpectIntrinsicPass();
+
+//===----------------------------------------------------------------------===//
+//
+// TLSVariableHoist - This pass reduce duplicated TLS address call.
+//
+FunctionPass *createTLSVariableHoistPass();
 
 //===----------------------------------------------------------------------===//
 //

@@ -16,16 +16,6 @@ bb:
   %tmp8 = load <4 x i32>, <4 x i32> addrspace(1)* %tmp7, align 16
   %tmp9 = getelementptr inbounds <4 x i32>, <4 x i32> addrspace(1)* %arg1, i64 %tmp6
   store <4 x i32> %tmp8, <4 x i32> addrspace(1)* %tmp9, align 16
-  %tmp10 = add nuw nsw i64 %tmp2, 2
-  %tmp11 = getelementptr inbounds <4 x i32>, <4 x i32> addrspace(1)* %arg, i64 %tmp10
-  %tmp12 = load <4 x i32>, <4 x i32> addrspace(1)* %tmp11, align 16
-  %tmp13 = getelementptr inbounds <4 x i32>, <4 x i32> addrspace(1)* %arg1, i64 %tmp10
-  store <4 x i32> %tmp12, <4 x i32> addrspace(1)* %tmp13, align 16
-  %tmp14 = add nuw nsw i64 %tmp2, 3
-  %tmp15 = getelementptr inbounds <4 x i32>, <4 x i32> addrspace(1)* %arg, i64 %tmp14
-  %tmp16 = load <4 x i32>, <4 x i32> addrspace(1)* %tmp15, align 16
-  %tmp17 = getelementptr inbounds <4 x i32>, <4 x i32> addrspace(1)* %arg1, i64 %tmp14
-  store <4 x i32> %tmp16, <4 x i32> addrspace(1)* %tmp17, align 16
   ret void
 }
 
@@ -86,8 +76,8 @@ bb:
 }
 
 ; GCN-LABEL: {{^}}test_indirect_through_phi:
-; MemoryBound: 0
-; WaveLimiterHint : 0
+; GCN: MemoryBound: 0
+; GCN: WaveLimiterHint : 0
 define amdgpu_kernel void @test_indirect_through_phi(float addrspace(1)* %arg) {
 bb:
   %load = load float, float addrspace(1)* %arg, align 8

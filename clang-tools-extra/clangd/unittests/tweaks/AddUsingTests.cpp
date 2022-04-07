@@ -7,9 +7,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "Config.h"
-#include "TestTU.h"
 #include "TweakTesting.h"
-#include "gmock/gmock-matchers.h"
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
 
@@ -78,6 +76,19 @@ public:
   EXPECT_UNAVAILABLE(Header + "void fun() { one::two::f^f(); }");
   FileName = "test.hpp";
   EXPECT_UNAVAILABLE(Header + "void fun() { one::two::f^f(); }");
+}
+
+TEST_F(AddUsingTest, Crash1072) {
+  // Used to crash when traversing catch(...)
+  // https://github.com/clangd/clangd/issues/1072
+  const char *Code = R"cpp(
+  namespace ns { class A; }
+  ns::^A *err;
+  void catchall() {
+    try {} catch(...) {}
+  }
+  )cpp";
+  EXPECT_AVAILABLE(Code);
 }
 
 TEST_F(AddUsingTest, Apply) {
@@ -444,6 +455,17 @@ one::t^wo::cc c;
 #include "test.hpp"
 using one::two::cc;using one::two::ee::ee_one;
 cc c;
+)cpp"},
+            // Template (like std::vector).
+            {R"cpp(
+#include "test.hpp"
+one::v^ec<int> foo;
+)cpp",
+             R"cpp(
+#include "test.hpp"
+using one::vec;
+
+vec<int> foo;
 )cpp"}};
   llvm::StringMap<std::string> EditedFiles;
   for (const auto &Case : Cases) {
@@ -461,6 +483,7 @@ public:
 };
 }
 using uu = two::cc;
+template<typename T> struct vec {};
 })cpp";
       EXPECT_EQ(apply(SubCase, &EditedFiles), Case.ExpectedSource);
     }

@@ -35,7 +35,6 @@
 #include "llvm/ADT/PointerIntPair.h"
 #include "llvm/IR/PassManager.h"
 #include "llvm/MC/MCContext.h"
-#include "llvm/MC/MCSymbol.h"
 #include "llvm/Pass.h"
 #include <memory>
 #include <utility>
@@ -44,12 +43,12 @@
 namespace llvm {
 
 class BasicBlock;
-class CallInst;
 class Function;
 class LLVMTargetMachine;
 class MMIAddrLabelMap;
 class MachineFunction;
 class Module;
+class MCSymbol;
 
 //===----------------------------------------------------------------------===//
 /// This class can be derived from and used by targets to hold private
@@ -185,7 +184,7 @@ public:
   /// Machine Function map.
   void deleteMachineFunctionFor(Function &F);
 
-  /// Keep track of various per-function pieces of information for backends
+  /// Keep track of various per-module pieces of information for backends
   /// that would like to do so.
   template<typename Ty>
   Ty &getObjFileInfo() {

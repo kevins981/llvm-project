@@ -10,6 +10,7 @@
 #define LLDB_UTILITY_TRACEGDBREMOTEPACKETS_H
 
 #include "llvm/Support/JSON.h"
+#include <chrono>
 
 #include "lldb/lldb-defines.h"
 #include "lldb/lldb-enumerations.h"
@@ -41,10 +42,13 @@ llvm::json::Value toJSON(const TraceSupportedResponse &packet);
 struct TraceStartRequest {
   /// Tracing technology name, e.g. intel-pt, arm-coresight.
   std::string type;
+
   /// If \a llvm::None, then this starts tracing the whole process. Otherwise,
   /// only tracing for the specified threads is enabled.
   llvm::Optional<std::vector<int64_t>> tids;
 
+  /// \return
+  ///     \b true if \a tids is \a None, i.e. whole process tracing.
   bool IsProcessTracing() const;
 };
 
@@ -57,7 +61,7 @@ llvm::json::Value toJSON(const TraceStartRequest &packet);
 /// jLLDBTraceStop gdb-remote packet
 /// \{
 struct TraceStopRequest {
-  TraceStopRequest() {}
+  TraceStopRequest() = default;
 
   TraceStopRequest(llvm::StringRef type, const std::vector<lldb::tid_t> &tids);
 
@@ -112,6 +116,31 @@ bool fromJSON(const llvm::json::Value &value, TraceThreadState &packet,
               llvm::json::Path path);
 
 llvm::json::Value toJSON(const TraceThreadState &packet);
+
+/// Interface for different algorithms used to convert trace
+/// counters into different units.
+template <typename ToType> class TraceCounterConversion {
+public:
+  virtual ~TraceCounterConversion() = default;
+
+  /// Convert from raw counter value to the target type.
+  ///
+  /// \param[in] raw_counter_value
+  ///   The raw counter value to be converted.
+  ///
+  /// \return
+  ///   The converted counter value.
+  virtual ToType Convert(uint64_t raw_counter_value) = 0;
+
+  /// Serialize trace counter conversion values to JSON.
+  ///
+  /// \return
+  ///   \a llvm::json::Value representing the trace counter conversion object.
+  virtual llvm::json::Value toJSON() = 0;
+};
+
+using TraceTscConversionUP =
+    std::unique_ptr<TraceCounterConversion<std::chrono::nanoseconds>>;
 
 struct TraceGetStateResponse {
   std::vector<TraceThreadState> tracedThreads;

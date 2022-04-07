@@ -7,8 +7,8 @@
 //===----------------------------------------------------------------------===//
 
 #include "PS4CPU.h"
-#include "FreeBSD.h"
 #include "CommonArgs.h"
+#include "FreeBSD.h"
 #include "clang/Driver/Compilation.h"
 #include "clang/Driver/Driver.h"
 #include "clang/Driver/DriverDiagnostic.h"
@@ -22,8 +22,6 @@
 using namespace clang::driver;
 using namespace clang;
 using namespace llvm::opt;
-
-using clang::driver::tools::AddLinkerInputs;
 
 void tools::PS4cpu::addProfileRTArgs(const ToolChain &TC, const ArgList &Args,
                                      ArgStringList &CmdArgs) {
@@ -71,8 +69,9 @@ void tools::PS4cpu::Assemble::ConstructJob(Compilation &C, const JobAction &JA,
                                          Exec, CmdArgs, Inputs, Output));
 }
 
-static void AddPS4SanitizerArgs(const ToolChain &TC, ArgStringList &CmdArgs) {
-  const SanitizerArgs &SanArgs = TC.getSanitizerArgs();
+static void AddPS4SanitizerArgs(const ToolChain &TC, const ArgList &Args,
+                                ArgStringList &CmdArgs) {
+  const SanitizerArgs &SanArgs = TC.getSanitizerArgs(Args);
   if (SanArgs.needsUbsanRt()) {
     CmdArgs.push_back("-lSceDbgUBSanitizer_stub_weak");
   }
@@ -81,9 +80,9 @@ static void AddPS4SanitizerArgs(const ToolChain &TC, ArgStringList &CmdArgs) {
   }
 }
 
-void tools::PS4cpu::addSanitizerArgs(const ToolChain &TC,
+void tools::PS4cpu::addSanitizerArgs(const ToolChain &TC, const ArgList &Args,
                                      ArgStringList &CmdArgs) {
-  const SanitizerArgs &SanArgs = TC.getSanitizerArgs();
+  const SanitizerArgs &SanArgs = TC.getSanitizerArgs(Args);
   if (SanArgs.needsUbsanRt())
     CmdArgs.push_back("--dependent-lib=libSceDbgUBSanitizer_stub_weak.a");
   if (SanArgs.needsAsanRt())
@@ -95,8 +94,8 @@ void tools::PS4cpu::Link::ConstructJob(Compilation &C, const JobAction &JA,
                                        const InputInfoList &Inputs,
                                        const ArgList &Args,
                                        const char *LinkingOutput) const {
-  const toolchains::FreeBSD &ToolChain =
-      static_cast<const toolchains::FreeBSD &>(getToolChain());
+  const toolchains::PS4CPU &ToolChain =
+      static_cast<const toolchains::PS4CPU &>(getToolChain());
   const Driver &D = ToolChain.getDriver();
   ArgStringList CmdArgs;
 
@@ -126,8 +125,8 @@ void tools::PS4cpu::Link::ConstructJob(Compilation &C, const JobAction &JA,
     assert(Output.isNothing() && "Invalid output.");
   }
 
-  if(!Args.hasArg(options::OPT_nostdlib, options::OPT_nodefaultlibs))
-    AddPS4SanitizerArgs(ToolChain, CmdArgs);
+  if (!Args.hasArg(options::OPT_nostdlib, options::OPT_nodefaultlibs))
+    AddPS4SanitizerArgs(ToolChain, Args, CmdArgs);
 
   Args.AddAllArgs(CmdArgs, options::OPT_L);
   Args.AddAllArgs(CmdArgs, options::OPT_T_Group);
@@ -150,8 +149,7 @@ void tools::PS4cpu::Link::ConstructJob(Compilation &C, const JobAction &JA,
         << "-fuse-ld" << getToolChain().getTriple().str();
   }
 
-  const char *Exec =
-      Args.MakeArgString(ToolChain.GetProgramPath("orbis-ld"));
+  const char *Exec = Args.MakeArgString(ToolChain.GetProgramPath("orbis-ld"));
 
   C.addCommand(std::make_unique<Command>(JA, *this,
                                          ResponseFileSupport::AtFileUTF8(),

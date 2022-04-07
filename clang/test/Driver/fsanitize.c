@@ -241,11 +241,26 @@
 
 // RUN: %clang -target x86_64-linux-gnu -fsanitize=address -fsanitize-address-globals-dead-stripping %s -### 2>&1 | FileCheck %s --check-prefix=CHECK-ASAN-GLOBALS
 // RUN: %clang -target x86_64-linux-gnu -fsanitize=address %s -### 2>&1 | FileCheck %s --check-prefix=CHECK-NO-ASAN-GLOBALS
+// RUN: %clang -target x86_64-linux-gnu -fsanitize=address -fsanitize-address-globals-dead-stripping -fno-sanitize-address-globals-dead-stripping %s -### 2>&1 | FileCheck %s --check-prefix=CHECK-NO-ASAN-GLOBALS
 // RUN: %clang_cl --target=x86_64-windows-msvc -fsanitize=address -fsanitize-address-globals-dead-stripping -### -- %s 2>&1 | FileCheck %s --check-prefix=CHECK-ASAN-GLOBALS
 // RUN: %clang_cl --target=x86_64-windows-msvc -fsanitize=address -### -- %s 2>&1 | FileCheck %s --check-prefix=CHECK-ASAN-GLOBALS
 // RUN: %clang -target x86_64-scei-ps4  -fsanitize=address %s -### 2>&1 | FileCheck %s --check-prefix=CHECK-ASAN-GLOBALS
 // CHECK-ASAN-GLOBALS: -cc1{{.*}}-fsanitize-address-globals-dead-stripping
 // CHECK-NO-ASAN-GLOBALS-NOT: -cc1{{.*}}-fsanitize-address-globals-dead-stripping
+
+// RUN: %clang -target x86_64-linux-gnu -fsanitize-address-outline-instrumentation %s -### 2>&1 | \
+// RUN:     FileCheck %s --check-prefix=CHECK-ASAN-OUTLINE-WARN
+// CHECK-ASAN-OUTLINE-WARN: warning: argument unused during compilation: '-fsanitize-address-outline-instrumentation'
+// RUN: %clang -target x86_64-linux-gnu -fsanitize=address -fsanitize-address-outline-instrumentation %s -### 2>&1 | \
+// RUN:     FileCheck %s --check-prefix=CHECK-ASAN-OUTLINE-OK
+// RUN: %clang -target x86_64-linux-gnu -fsanitize=address -fno-sanitize-address-outline-instrumentation -fsanitize-address-outline-instrumentation %s -### 2>&1 | \
+// RUN:     FileCheck %s --check-prefix=CHECK-ASAN-OUTLINE-OK
+// CHECK-ASAN-OUTLINE-OK: "-mllvm" "-asan-instrumentation-with-call-threshold=0"
+// RUN: %clang -target x86_64-linux-gnu -fsanitize=address -fno-sanitize-address-outline-instrumentation %s -### 2>&1 | \
+// RUN:     FileCheck %s --check-prefix=CHECK-NO-CHECK-ASAN-CALLBACK
+// RUN: %clang -target x86_64-linux-gnu -fsanitize=address -fsanitize-address-outline-instrumentation -fno-sanitize-address-outline-instrumentation %s -### 2>&1 | \
+// RUN:     FileCheck %s --check-prefix=CHECK-NO-CHECK-ASAN-CALLBACK
+// CHECK-NO-CHECK-ASAN-CALLBACK-NOT: "-mllvm" "-asan-instrumentation-with-call-threshold=0"
 
 // RUN: %clang -target x86_64-linux-gnu -fsanitize=address -fsanitize-address-use-odr-indicator %s -### 2>&1 | FileCheck %s --check-prefix=CHECK-ASAN-ODR-INDICATOR
 // RUN: %clang_cl --target=x86_64-windows -fsanitize=address -fsanitize-address-use-odr-indicator -### -- %s 2>&1 | FileCheck %s --check-prefix=CHECK-ASAN-ODR-INDICATOR
@@ -329,27 +344,6 @@
 
 // RUN: %clang -target x86_64-linux-gnu -fsanitize=vptr -fno-sanitize=vptr -fsanitize=undefined,address %s -### 2>&1
 // OK
-
-// RUN: %clang -target x86_64-linux-gnu -fsanitize=thread %s -### 2>&1 | FileCheck %s --check-prefix=CHECK-NO-PIE
-// RUN: %clang -target x86_64-linux-gnu -fsanitize=memory %s -### 2>&1 | FileCheck %s --check-prefix=CHECK-NO-PIE
-// RUN: %clang -target x86_64-unknown-freebsd -fsanitize=memory %s -### 2>&1 | FileCheck %s --check-prefix=CHECK-PIE
-// RUN: %clang -target aarch64-linux-gnu -fsanitize=memory %s -### 2>&1 | FileCheck %s --check-prefix=CHECK-PIE
-// RUN: %clang -target arm-linux-androideabi -fsanitize=address %s -### 2>&1 | FileCheck %s --check-prefix=CHECK-PIC-NO-PIE
-// RUN: %clang -target arm-linux-androideabi24 -fsanitize=address %s -### 2>&1 | FileCheck %s --check-prefix=CHECK-PIE
-// RUN: %clang -target aarch64-linux-android -fsanitize=address %s -### 2>&1 | FileCheck %s --check-prefix=CHECK-PIE
-// RUN: %clang -target x86_64-linux-gnu -fsanitize=address %s -### 2>&1 | FileCheck %s --check-prefix=CHECK-NO-PIE
-// RUN: %clang -target i386-linux-gnu -fsanitize=address %s -### 2>&1 | FileCheck %s --check-prefix=CHECK-NO-PIE
-
-// CHECK-NO-PIE-NOT: "-pie"
-// CHECK-NO-PIE: "-mrelocation-model" "static"
-// CHECK-NO-PIE-NOT: "-pie"
-
-// CHECK-PIC-NO-PIE-NOT: "-pie"
-// CHECK-PIC-NO-PIE: "-mrelocation-model" "pic"
-// CHECK-PIC-NO-PIE-NOT: "-pie"
-
-// CHECK-PIE: "-mrelocation-model" "pic" "-pic-level" "2" "-pic-is-pie"
-// CHECK-PIE: "-pie"
 
 // RUN: %clang -target arm-linux-androideabi %s -### 2>&1 | FileCheck %s --check-prefix=CHECK-ANDROID-NO-ASAN
 // CHECK-ANDROID-NO-ASAN: "-mrelocation-model" "pic"
@@ -894,6 +888,9 @@
 // CHECK-HWASAN-INTERCEPTOR-ABI: "-default-function-attr" "hwasan-abi=interceptor"
 // CHECK-HWASAN-PLATFORM-ABI: "-default-function-attr" "hwasan-abi=platform"
 // CHECK-HWASAN-FOO-ABI: error: invalid value 'foo' in '-fsanitize-hwaddress-abi=foo'
+
+// RUN: %clang -target x86_64-linux-gnu -fsanitize=hwaddress -fsanitize-hwaddress-experimental-aliasing %s -### 2>&1 | FileCheck %s --check-prefix=CHECK-HWASAN-ALIAS
+// CHECK-HWASAN-ALIAS: "-mllvm" "-hwasan-experimental-use-page-aliases=1"
 
 // RUN: %clang -target x86_64-linux-gnu -fsanitize=address,pointer-compare,pointer-subtract %s -### 2>&1 | FileCheck %s --check-prefix=CHECK-POINTER-ALL
 // RUN: %clang -target x86_64-linux-gnu -fsanitize=pointer-compare %s -### 2>&1 | FileCheck %s --check-prefix=CHECK-POINTER-CMP-NEEDS-ADDRESS

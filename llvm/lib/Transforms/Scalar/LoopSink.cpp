@@ -35,23 +35,18 @@
 #include "llvm/ADT/Statistic.h"
 #include "llvm/Analysis/AliasAnalysis.h"
 #include "llvm/Analysis/AliasSetTracker.h"
-#include "llvm/Analysis/BasicAliasAnalysis.h"
 #include "llvm/Analysis/BlockFrequencyInfo.h"
-#include "llvm/Analysis/Loads.h"
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/Analysis/LoopPass.h"
 #include "llvm/Analysis/MemorySSA.h"
 #include "llvm/Analysis/MemorySSAUpdater.h"
 #include "llvm/Analysis/ScalarEvolution.h"
-#include "llvm/Analysis/ScalarEvolutionAliasAnalysis.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/Instructions.h"
-#include "llvm/IR/LLVMContext.h"
-#include "llvm/IR/Metadata.h"
 #include "llvm/InitializePasses.h"
+#include "llvm/Support/BranchProbability.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Transforms/Scalar.h"
-#include "llvm/Transforms/Scalar/LoopPassManager.h"
 #include "llvm/Transforms/Utils/Local.h"
 #include "llvm/Transforms/Utils/LoopUtils.h"
 using namespace llvm;
@@ -75,7 +70,7 @@ static cl::opt<bool> EnableMSSAInLoopSink(
     cl::desc("Enable MemorySSA for LoopSink in new pass manager"));
 
 static cl::opt<bool> EnableMSSAInLegacyLoopSink(
-    "enable-mssa-in-legacy-loop-sink", cl::Hidden, cl::init(false),
+    "enable-mssa-in-legacy-loop-sink", cl::Hidden, cl::init(true),
     cl::desc("Enable MemorySSA for LoopSink in legacy pass manager"));
 
 /// Return adjusted total frequency of \p BBs.
@@ -323,15 +318,16 @@ static bool sinkLoopInvariantInstructions(Loop &L, AAResults &AA, LoopInfo &LI,
   // Traverse preheader's instructions in reverse order becaue if A depends
   // on B (A appears after B), A needs to be sinked first before B can be
   // sinked.
-  for (auto II = Preheader->rbegin(), E = Preheader->rend(); II != E;) {
-    Instruction *I = &*II++;
+  for (Instruction &I : llvm::make_early_inc_range(llvm::reverse(*Preheader))) {
+    if (isa<PHINode>(&I))
+      continue;
     // No need to check for instruction's operands are loop invariant.
-    assert(L.hasLoopInvariantOperands(I) &&
+    assert(L.hasLoopInvariantOperands(&I) &&
            "Insts in a loop's preheader should have loop invariant operands!");
-    if (!canSinkOrHoistInst(*I, &AA, &DT, &L, CurAST, MSSAU.get(), false,
+    if (!canSinkOrHoistInst(I, &AA, &DT, &L, CurAST, MSSAU.get(), false,
                             LICMFlags.get()))
       continue;
-    if (sinkInstruction(L, *I, ColdLoopBBs, LoopBlockNumber, LI, DT, BFI,
+    if (sinkInstruction(L, I, ColdLoopBBs, LoopBlockNumber, LI, DT, BFI,
                         MSSAU.get()))
       Changed = true;
   }
@@ -385,7 +381,7 @@ PreservedAnalyses LoopSinkPass::run(Function &F, FunctionAnalysisManager &FAM) {
     std::unique_ptr<AliasSetTracker> CurAST;
     if (!EnableMSSAInLoopSink) {
       CurAST = std::make_unique<AliasSetTracker>(AA);
-      computeAliasSet(L, *Preheader, *CurAST.get());
+      computeAliasSet(L, *Preheader, *CurAST);
     }
 
     // Note that we don't pass SCEV here because it is only used to invalidate
@@ -440,7 +436,7 @@ struct LegacyLoopSinkPass : public LoopPass {
       MSSA = &getAnalysis<MemorySSAWrapperPass>().getMSSA();
     else {
       CurAST = std::make_unique<AliasSetTracker>(AA);
-      computeAliasSet(*L, *Preheader, *CurAST.get());
+      computeAliasSet(*L, *Preheader, *CurAST);
     }
 
     bool Changed = sinkLoopInvariantInstructions(

@@ -30,6 +30,70 @@ using namespace lldb_private::npdb;
 using namespace llvm::codeview;
 using namespace llvm::pdb;
 
+namespace {
+struct CreateMethodDecl : public TypeVisitorCallbacks {
+  CreateMethodDecl(PdbIndex &m_index, TypeSystemClang &m_clang,
+                   TypeIndex func_type_index,
+                   clang::FunctionDecl *&function_decl,
+                   lldb::opaque_compiler_type_t parent_ty,
+                   llvm::StringRef proc_name, CompilerType func_ct)
+      : m_index(m_index), m_clang(m_clang), func_type_index(func_type_index),
+        function_decl(function_decl), parent_ty(parent_ty),
+        proc_name(proc_name), func_ct(func_ct) {}
+  PdbIndex &m_index;
+  TypeSystemClang &m_clang;
+  TypeIndex func_type_index;
+  clang::FunctionDecl *&function_decl;
+  lldb::opaque_compiler_type_t parent_ty;
+  llvm::StringRef proc_name;
+  CompilerType func_ct;
+
+  llvm::Error visitKnownMember(CVMemberRecord &cvr,
+                               OverloadedMethodRecord &overloaded) override {
+    TypeIndex method_list_idx = overloaded.MethodList;
+
+    CVType method_list_type = m_index.tpi().getType(method_list_idx);
+    assert(method_list_type.kind() == LF_METHODLIST);
+
+    MethodOverloadListRecord method_list;
+    llvm::cantFail(TypeDeserializer::deserializeAs<MethodOverloadListRecord>(
+        method_list_type, method_list));
+
+    for (const OneMethodRecord &method : method_list.Methods) {
+      if (method.getType().getIndex() == func_type_index.getIndex())
+        AddMethod(overloaded.Name, method.getAccess(), method.getOptions(),
+                  method.Attrs);
+    }
+
+    return llvm::Error::success();
+  }
+
+  llvm::Error visitKnownMember(CVMemberRecord &cvr,
+                               OneMethodRecord &record) override {
+    AddMethod(record.getName(), record.getAccess(), record.getOptions(),
+              record.Attrs);
+    return llvm::Error::success();
+  }
+
+  void AddMethod(llvm::StringRef name, MemberAccess access,
+                 MethodOptions options, MemberAttributes attrs) {
+    if (name != proc_name || function_decl)
+      return;
+    lldb::AccessType access_type = TranslateMemberAccess(access);
+    bool is_virtual = attrs.isVirtual();
+    bool is_static = attrs.isStatic();
+    bool is_artificial = (options & MethodOptions::CompilerGenerated) ==
+                         MethodOptions::CompilerGenerated;
+    function_decl = m_clang.AddMethodToCXXRecordType(
+        parent_ty, proc_name,
+        /*mangled_name=*/nullptr, func_ct, /*access=*/access_type,
+        /*is_virtual=*/is_virtual, /*is_static=*/is_static,
+        /*is_inline=*/false, /*is_explicit=*/false,
+        /*is_attr_used=*/false, /*is_artificial=*/is_artificial);
+  }
+};
+} // namespace
+
 static llvm::Optional<PdbCompilandSymId> FindSymbolScope(PdbIndex &index,
                                                          PdbCompilandSymId id) {
   CVSymbol sym = index.ReadSymbolRecord(id);
@@ -54,12 +118,6 @@ static llvm::Optional<PdbCompilandSymId> FindSymbolScope(PdbIndex &index,
   std::vector<PdbCompilandSymId> scope_stack;
 
   while (begin != end) {
-    if (id.offset == begin.offset()) {
-      // We have a match!  Return the top of the stack
-      if (scope_stack.empty())
-        return llvm::None;
-      return scope_stack.back();
-    }
     if (begin.offset() > id.offset) {
       // We passed it.  We couldn't even find this symbol record.
       lldbassert(false && "Invalid compiland symbol id!");
@@ -72,7 +130,7 @@ static llvm::Optional<PdbCompilandSymId> FindSymbolScope(PdbIndex &index,
       // We can use the end offset of the scope to determine whether or not
       // we can just outright skip this entire scope.
       uint32_t scope_end = getScopeEndOffset(*begin);
-      if (scope_end < id.modi) {
+      if (scope_end < id.offset) {
         begin = syms.at(scope_end);
       } else {
         // The symbol we're looking for is somewhere in this scope.
@@ -83,8 +141,10 @@ static llvm::Optional<PdbCompilandSymId> FindSymbolScope(PdbIndex &index,
     }
     ++begin;
   }
-
-  return llvm::None;
+  if (scope_stack.empty())
+    return llvm::None;
+  // We have a match!  Return the top of the stack
+  return scope_stack.back();
 }
 
 static clang::TagTypeKind TranslateUdtKind(const TagRecord &cr) {
@@ -437,7 +497,8 @@ clang::Decl *PdbAstBuilder::GetOrCreateSymbolForId(PdbCompilandSymId id) {
   if (isLocalVariableType(cvs.kind())) {
     clang::DeclContext *scope = GetParentDeclContext(id);
     clang::Decl *scope_decl = clang::Decl::castFromDeclContext(scope);
-    PdbCompilandSymId scope_id(id.modi, m_decl_to_status[scope_decl].uid);
+    PdbCompilandSymId scope_id =
+        PdbSymUid(m_decl_to_status[scope_decl].uid).asCompilandSym();
     return GetOrCreateVariableDecl(scope_id, id);
   }
 
@@ -453,6 +514,8 @@ clang::Decl *PdbAstBuilder::GetOrCreateSymbolForId(PdbCompilandSymId id) {
     return nullptr;
   case S_BLOCK32:
     return GetOrCreateBlockDecl(id);
+  case S_INLINESITE:
+    return GetOrCreateInlinedFunctionDecl(id);
   default:
     return nullptr;
   }
@@ -478,6 +541,9 @@ llvm::Optional<CompilerDecl> PdbAstBuilder::GetOrCreateDeclForUid(PdbSymUid uid)
   default:
     return llvm::None;
   }
+
+  if (!result)
+    return llvm::None;
   m_uid_to_decl[toOpaqueUid(uid)] = result;
   return ToCompilerDecl(*result);
 }
@@ -681,7 +747,8 @@ bool PdbAstBuilder::CompleteTagDecl(clang::TagDecl &tag) {
   // Visit all members of this class, then perform any finalization necessary
   // to complete the class.
   CompilerType ct = ToCompilerType(tag_qt);
-  UdtRecordCompleter completer(best_ti, ct, tag, *this, m_index);
+  UdtRecordCompleter completer(best_ti, ct, tag, *this, m_index,
+                               m_cxx_record_map);
   auto error =
       llvm::codeview::visitMemberRecordStream(field_list_cvt.data(), completer);
   completer.complete();
@@ -851,6 +918,8 @@ PdbAstBuilder::GetOrCreateVariableDecl(PdbCompilandSymId scope_id,
     return llvm::dyn_cast<clang::VarDecl>(decl);
 
   clang::DeclContext *scope = GetOrCreateDeclContextForUid(scope_id);
+  if (!scope)
+    return nullptr;
 
   CVSymbol sym = m_index.ReadSymbolRecord(var_id);
   return CreateVariableDecl(PdbSymUid(var_id), sym, *scope);
@@ -980,6 +1049,153 @@ clang::QualType PdbAstBuilder::GetOrCreateType(PdbTypeSymId type) {
 }
 
 clang::FunctionDecl *
+PdbAstBuilder::CreateFunctionDecl(PdbCompilandSymId func_id,
+                                  llvm::StringRef func_name, TypeIndex func_ti,
+                                  CompilerType func_ct, uint32_t param_count,
+                                  clang::StorageClass func_storage,
+                                  bool is_inline, clang::DeclContext *parent) {
+  clang::FunctionDecl *function_decl = nullptr;
+  if (parent->isRecord()) {
+    clang::QualType parent_qt = llvm::cast<clang::TypeDecl>(parent)
+                                    ->getTypeForDecl()
+                                    ->getCanonicalTypeInternal();
+    lldb::opaque_compiler_type_t parent_opaque_ty =
+        ToCompilerType(parent_qt).GetOpaqueQualType();
+    auto iter = m_cxx_record_map.find(parent_opaque_ty);
+    if (iter != m_cxx_record_map.end()) {
+      if (iter->getSecond().contains({func_name, func_ct})) {
+        return nullptr;
+      }
+    }
+
+    CVType cvt = m_index.tpi().getType(func_ti);
+    MemberFunctionRecord func_record(static_cast<TypeRecordKind>(cvt.kind()));
+    llvm::cantFail(TypeDeserializer::deserializeAs<MemberFunctionRecord>(
+        cvt, func_record));
+    TypeIndex class_index = func_record.getClassType();
+
+    CVType parent_cvt = m_index.tpi().getType(class_index);
+    ClassRecord class_record = CVTagRecord::create(parent_cvt).asClass();
+    // If it's a forward reference, try to get the real TypeIndex.
+    if (class_record.isForwardRef()) {
+      llvm::Expected<TypeIndex> eti =
+          m_index.tpi().findFullDeclForForwardRef(class_index);
+      if (eti) {
+        class_record =
+            CVTagRecord::create(m_index.tpi().getType(*eti)).asClass();
+      }
+    }
+    if (!class_record.FieldList.isSimple()) {
+      CVType field_list = m_index.tpi().getType(class_record.FieldList);
+      CreateMethodDecl process(m_index, m_clang, func_ti, function_decl,
+                               parent_opaque_ty, func_name, func_ct);
+      if (llvm::Error err = visitMemberRecordStream(field_list.data(), process))
+        llvm::consumeError(std::move(err));
+    }
+
+    if (!function_decl) {
+      function_decl = m_clang.AddMethodToCXXRecordType(
+          parent_opaque_ty, func_name,
+          /*mangled_name=*/nullptr, func_ct,
+          /*access=*/lldb::AccessType::eAccessPublic,
+          /*is_virtual=*/false, /*is_static=*/false,
+          /*is_inline=*/false, /*is_explicit=*/false,
+          /*is_attr_used=*/false, /*is_artificial=*/false);
+    }
+    m_cxx_record_map[parent_opaque_ty].insert({func_name, func_ct});
+  } else {
+    function_decl = m_clang.CreateFunctionDeclaration(
+        parent, OptionalClangModuleID(), func_name, func_ct, func_storage,
+        is_inline);
+    CreateFunctionParameters(func_id, *function_decl, param_count);
+  }
+  return function_decl;
+}
+
+clang::FunctionDecl *
+PdbAstBuilder::GetOrCreateInlinedFunctionDecl(PdbCompilandSymId inlinesite_id) {
+  CompilandIndexItem *cii =
+      m_index.compilands().GetCompiland(inlinesite_id.modi);
+  CVSymbol sym = cii->m_debug_stream.readSymbolAtOffset(inlinesite_id.offset);
+  InlineSiteSym inline_site(static_cast<SymbolRecordKind>(sym.kind()));
+  cantFail(SymbolDeserializer::deserializeAs<InlineSiteSym>(sym, inline_site));
+
+  // Inlinee is the id index to the function id record that is inlined.
+  PdbTypeSymId func_id(inline_site.Inlinee, true);
+  // Look up the function decl by the id index to see if we have created a
+  // function decl for a different inlinesite that refers the same function.
+  if (clang::Decl *decl = TryGetDecl(func_id))
+    return llvm::dyn_cast<clang::FunctionDecl>(decl);
+  clang::FunctionDecl *function_decl =
+      CreateFunctionDeclFromId(func_id, inlinesite_id);
+
+  // Use inline site id in m_decl_to_status because it's expected to be a
+  // PdbCompilandSymId so that we can parse local variables info after it.
+  uint64_t inlinesite_uid = toOpaqueUid(inlinesite_id);
+  DeclStatus status;
+  status.resolved = true;
+  status.uid = inlinesite_uid;
+  m_decl_to_status.insert({function_decl, status});
+  // Use the index in IPI stream as uid in m_uid_to_decl, because index in IPI
+  // stream are unique and there could be multiple inline sites (different ids)
+  // referring the same inline function. This avoid creating multiple same
+  // inline function delcs.
+  uint64_t func_uid = toOpaqueUid(func_id);
+  lldbassert(m_uid_to_decl.count(func_uid) == 0);
+  m_uid_to_decl[func_uid] = function_decl;
+  return function_decl;
+}
+
+clang::FunctionDecl *
+PdbAstBuilder::CreateFunctionDeclFromId(PdbTypeSymId func_tid,
+                                        PdbCompilandSymId func_sid) {
+  lldbassert(func_tid.is_ipi);
+  CVType func_cvt = m_index.ipi().getType(func_tid.index);
+  llvm::StringRef func_name;
+  TypeIndex func_ti;
+  clang::DeclContext *parent = nullptr;
+  switch (func_cvt.kind()) {
+  case LF_MFUNC_ID: {
+    MemberFuncIdRecord mfr;
+    cantFail(
+        TypeDeserializer::deserializeAs<MemberFuncIdRecord>(func_cvt, mfr));
+    func_name = mfr.getName();
+    func_ti = mfr.getFunctionType();
+    PdbTypeSymId class_type_id(mfr.ClassType, false);
+    parent = GetOrCreateDeclContextForUid(class_type_id);
+    break;
+  }
+  case LF_FUNC_ID: {
+    FuncIdRecord fir;
+    cantFail(TypeDeserializer::deserializeAs<FuncIdRecord>(func_cvt, fir));
+    func_name = fir.getName();
+    func_ti = fir.getFunctionType();
+    parent = FromCompilerDeclContext(GetTranslationUnitDecl());
+    if (!fir.ParentScope.isNoneType()) {
+      CVType parent_cvt = m_index.ipi().getType(fir.ParentScope);
+      if (parent_cvt.kind() == LF_STRING_ID) {
+        StringIdRecord sir;
+        cantFail(
+            TypeDeserializer::deserializeAs<StringIdRecord>(parent_cvt, sir));
+        parent = GetOrCreateNamespaceDecl(sir.String.data(), *parent);
+      }
+    }
+    break;
+  }
+  default:
+    lldbassert(false && "Invalid function id type!");
+  }
+  clang::QualType func_qt = GetOrCreateType(func_ti);
+  if (func_qt.isNull())
+    return nullptr;
+  CompilerType func_ct = ToCompilerType(func_qt);
+  uint32_t param_count =
+      llvm::cast<clang::FunctionProtoType>(func_qt)->getNumParams();
+  return CreateFunctionDecl(func_sid, func_name, func_ti, func_ct, param_count,
+                            clang::SC_None, true, parent);
+}
+
+clang::FunctionDecl *
 PdbAstBuilder::GetOrCreateFunctionDecl(PdbCompilandSymId func_id) {
   if (clang::Decl *decl = TryGetDecl(func_id))
     return llvm::dyn_cast<clang::FunctionDecl>(decl);
@@ -1014,8 +1230,9 @@ PdbAstBuilder::GetOrCreateFunctionDecl(PdbCompilandSymId func_id) {
   proc_name.consume_front(context_name);
   proc_name.consume_front("::");
 
-  clang::FunctionDecl *function_decl = m_clang.CreateFunctionDeclaration(
-      parent, OptionalClangModuleID(), proc_name, func_ct, storage, false);
+  clang::FunctionDecl *function_decl =
+      CreateFunctionDecl(func_id, proc_name, proc.FunctionType, func_ct,
+                         func_type->getNumParams(), storage, false, parent);
 
   lldbassert(m_uid_to_decl.count(toOpaqueUid(func_id)) == 0);
   m_uid_to_decl[toOpaqueUid(func_id)] = function_decl;
@@ -1023,8 +1240,6 @@ PdbAstBuilder::GetOrCreateFunctionDecl(PdbCompilandSymId func_id) {
   status.resolved = true;
   status.uid = toOpaqueUid(func_id);
   m_decl_to_status.insert({function_decl, status});
-
-  CreateFunctionParameters(func_id, *function_decl, func_type->getNumParams());
 
   return function_decl;
 }
@@ -1093,7 +1308,7 @@ void PdbAstBuilder::CreateFunctionParameters(PdbCompilandSymId func_id,
   }
 
   if (!params.empty())
-    m_clang.SetFunctionParameters(&function_decl, params.data(), params.size());
+    m_clang.SetFunctionParameters(&function_decl, params);
 }
 
 clang::QualType PdbAstBuilder::CreateEnumType(PdbTypeSymId id,
@@ -1105,7 +1320,7 @@ clang::QualType PdbAstBuilder::CreateEnumType(PdbTypeSymId id,
 
   Declaration declaration;
   CompilerType enum_ct = m_clang.CreateEnumerationType(
-      uname.c_str(), decl_context, OptionalClangModuleID(), declaration,
+      uname, decl_context, OptionalClangModuleID(), declaration,
       ToCompilerType(underlying_type), er.isScoped());
 
   TypeSystemClang::StartTagDeclarationDefinition(enum_ct);
@@ -1117,8 +1332,10 @@ clang::QualType PdbAstBuilder::CreateEnumType(PdbTypeSymId id,
 clang::QualType PdbAstBuilder::CreateArrayType(const ArrayRecord &ar) {
   clang::QualType element_type = GetOrCreateType(ar.ElementType);
 
-  uint64_t element_count =
-      ar.Size / GetSizeOfType({ar.ElementType}, m_index.tpi());
+  uint64_t element_size = GetSizeOfType({ar.ElementType}, m_index.tpi());
+  if (element_size == 0)
+    return {};
+  uint64_t element_count = ar.Size / element_size;
 
   CompilerType array_ct = m_clang.CreateArrayType(ToCompilerType(element_type),
                                                   element_count, false);
@@ -1163,15 +1380,15 @@ clang::QualType PdbAstBuilder::CreateFunctionType(
 }
 
 static bool isTagDecl(clang::DeclContext &context) {
-  return !!llvm::dyn_cast<clang::TagDecl>(&context);
+  return llvm::isa<clang::TagDecl>(&context);
 }
 
 static bool isFunctionDecl(clang::DeclContext &context) {
-  return !!llvm::dyn_cast<clang::FunctionDecl>(&context);
+  return llvm::isa<clang::FunctionDecl>(&context);
 }
 
 static bool isBlockDecl(clang::DeclContext &context) {
-  return !!llvm::dyn_cast<clang::BlockDecl>(&context);
+  return llvm::isa<clang::BlockDecl>(&context);
 }
 
 void PdbAstBuilder::ParseAllNamespacesPlusChildrenOf(
@@ -1201,7 +1418,7 @@ void PdbAstBuilder::ParseAllNamespacesPlusChildrenOf(
     if (!context->isNamespace())
       continue;
 
-    clang::NamespaceDecl *ns = llvm::dyn_cast<clang::NamespaceDecl>(context);
+    clang::NamespaceDecl *ns = llvm::cast<clang::NamespaceDecl>(context);
     std::string actual_ns = ns->getQualifiedNameAsString();
     if (llvm::StringRef(actual_ns).startswith(*parent)) {
       clang::QualType qt = GetOrCreateType(tid);
@@ -1268,7 +1485,7 @@ static CVSymbolArray skipFunctionParameters(clang::Decl &decl,
 void PdbAstBuilder::ParseBlockChildren(PdbCompilandSymId block_id) {
   CVSymbol sym = m_index.ReadSymbolRecord(block_id);
   lldbassert(sym.kind() == S_GPROC32 || sym.kind() == S_LPROC32 ||
-             sym.kind() == S_BLOCK32);
+             sym.kind() == S_BLOCK32 || sym.kind() == S_INLINESITE);
   CompilandIndexItem &cii =
       m_index.compilands().GetOrCreateCompiland(block_id.modi);
   CVSymbolArray symbols =
@@ -1280,11 +1497,12 @@ void PdbAstBuilder::ParseBlockChildren(PdbCompilandSymId block_id) {
     symbols =
         skipFunctionParameters(*m_uid_to_decl[toOpaqueUid(block_id)], symbols);
 
+  symbols.drop_front();
   auto begin = symbols.begin();
   while (begin != symbols.end()) {
     PdbCompilandSymId child_sym_id(block_id.modi, begin.offset());
     GetOrCreateSymbolForId(child_sym_id);
-    if (begin->kind() == S_BLOCK32) {
+    if (begin->kind() == S_BLOCK32 || begin->kind() == S_INLINESITE) {
       ParseBlockChildren(child_sym_id);
       begin = symbols.at(getScopeEndOffset(*begin));
     }
@@ -1358,4 +1576,6 @@ PdbAstBuilder::FromCompilerDeclContext(CompilerDeclContext context) {
   return static_cast<clang::DeclContext *>(context.GetOpaqueDeclContext());
 }
 
-void PdbAstBuilder::Dump(Stream &stream) { m_clang.Dump(stream); }
+void PdbAstBuilder::Dump(Stream &stream) {
+  m_clang.Dump(stream.AsRawOstream());
+}

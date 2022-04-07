@@ -7,10 +7,10 @@
 //===----------------------------------------------------------------------===//
 
 #include "LSPServer.h"
+#include "../lsp-server-support/Logging.h"
+#include "../lsp-server-support/Protocol.h"
+#include "../lsp-server-support/Transport.h"
 #include "MLIRServer.h"
-#include "lsp/Logging.h"
-#include "lsp/Protocol.h"
-#include "lsp/Transport.h"
 #include "llvm/ADT/FunctionExtras.h"
 #include "llvm/ADT/StringMap.h"
 
@@ -56,6 +56,16 @@ struct LSPServer::Impl {
   void onHover(const TextDocumentPositionParams &params,
                Callback<Optional<Hover>> reply);
 
+  //===--------------------------------------------------------------------===//
+  // Document Symbols
+
+  void onDocumentSymbol(const DocumentSymbolParams &params,
+                        Callback<std::vector<DocumentSymbol>> reply);
+
+  //===--------------------------------------------------------------------===//
+  // Fields
+  //===--------------------------------------------------------------------===//
+
   MLIRServer &server;
   JSONTransport &transport;
 
@@ -73,6 +83,7 @@ struct LSPServer::Impl {
 
 void LSPServer::Impl::onInitialize(const InitializeParams &params,
                                    Callback<llvm::json::Value> reply) {
+  // Send a response with the capabilities of this server.
   llvm::json::Object serverCaps{
       {"textDocumentSync",
        llvm::json::Object{
@@ -83,6 +94,11 @@ void LSPServer::Impl::onInitialize(const InitializeParams &params,
       {"definitionProvider", true},
       {"referencesProvider", true},
       {"hoverProvider", true},
+
+      // For now we only support documenting symbols when the client supports
+      // hierarchical symbols.
+      {"documentSymbolProvider",
+       params.capabilities.hierarchicalDocumentSymbol},
   };
 
   llvm::json::Object result{
@@ -166,12 +182,23 @@ void LSPServer::Impl::onHover(const TextDocumentPositionParams &params,
 }
 
 //===----------------------------------------------------------------------===//
+// Document Symbols
+
+void LSPServer::Impl::onDocumentSymbol(
+    const DocumentSymbolParams &params,
+    Callback<std::vector<DocumentSymbol>> reply) {
+  std::vector<DocumentSymbol> symbols;
+  server.findDocumentSymbols(params.textDocument.uri, symbols);
+  reply(std::move(symbols));
+}
+
+//===----------------------------------------------------------------------===//
 // LSPServer
 //===----------------------------------------------------------------------===//
 
 LSPServer::LSPServer(MLIRServer &server, JSONTransport &transport)
     : impl(std::make_unique<Impl>(server, transport)) {}
-LSPServer::~LSPServer() {}
+LSPServer::~LSPServer() = default;
 
 LogicalResult LSPServer::run() {
   MessageHandler messageHandler(impl->transport);
@@ -197,6 +224,10 @@ LogicalResult LSPServer::run() {
 
   // Hover
   messageHandler.method("textDocument/hover", impl.get(), &Impl::onHover);
+
+  // Document Symbols
+  messageHandler.method("textDocument/documentSymbol", impl.get(),
+                        &Impl::onDocumentSymbol);
 
   // Diagnostics
   impl->publishDiagnostics =

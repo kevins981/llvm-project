@@ -17,12 +17,16 @@
 #include "Utils/AMDKernelCodeTUtils.h"
 #include "llvm/BinaryFormat/AMDGPUMetadataVerifier.h"
 #include "llvm/BinaryFormat/ELF.h"
+#include "llvm/MC/MCAssembler.h"
 #include "llvm/MC/MCContext.h"
 #include "llvm/MC/MCELFStreamer.h"
 #include "llvm/MC/MCSectionELF.h"
+#include "llvm/MC/MCSubtargetInfo.h"
 #include "llvm/Support/AMDGPUMetadata.h"
 #include "llvm/Support/AMDHSAKernelDescriptor.h"
+#include "llvm/Support/Casting.h"
 #include "llvm/Support/FormattedStream.h"
+#include "llvm/Support/TargetParser.h"
 
 using namespace llvm;
 using namespace llvm::AMDGPU;
@@ -102,14 +106,18 @@ StringRef AMDGPUTargetStreamer::getArchNameFromElfMach(unsigned ElfMach) {
   case ELF::EF_AMDGPU_MACH_AMDGCN_GFX909:  AK = GK_GFX909;  break;
   case ELF::EF_AMDGPU_MACH_AMDGCN_GFX90A:  AK = GK_GFX90A;  break;
   case ELF::EF_AMDGPU_MACH_AMDGCN_GFX90C:  AK = GK_GFX90C;  break;
+  case ELF::EF_AMDGPU_MACH_AMDGCN_GFX940:  AK = GK_GFX940;  break;
   case ELF::EF_AMDGPU_MACH_AMDGCN_GFX1010: AK = GK_GFX1010; break;
   case ELF::EF_AMDGPU_MACH_AMDGCN_GFX1011: AK = GK_GFX1011; break;
   case ELF::EF_AMDGPU_MACH_AMDGCN_GFX1012: AK = GK_GFX1012; break;
+  case ELF::EF_AMDGPU_MACH_AMDGCN_GFX1013: AK = GK_GFX1013; break;
   case ELF::EF_AMDGPU_MACH_AMDGCN_GFX1030: AK = GK_GFX1030; break;
   case ELF::EF_AMDGPU_MACH_AMDGCN_GFX1031: AK = GK_GFX1031; break;
   case ELF::EF_AMDGPU_MACH_AMDGCN_GFX1032: AK = GK_GFX1032; break;
   case ELF::EF_AMDGPU_MACH_AMDGCN_GFX1033: AK = GK_GFX1033; break;
   case ELF::EF_AMDGPU_MACH_AMDGCN_GFX1034: AK = GK_GFX1034; break;
+  case ELF::EF_AMDGPU_MACH_AMDGCN_GFX1035: AK = GK_GFX1035; break;
+  case ELF::EF_AMDGPU_MACH_AMDGCN_GFX1036: AK = GK_GFX1036; break;
   case ELF::EF_AMDGPU_MACH_NONE:           AK = GK_NONE;    break;
   }
 
@@ -163,14 +171,18 @@ unsigned AMDGPUTargetStreamer::getElfMach(StringRef GPU) {
   case GK_GFX909:  return ELF::EF_AMDGPU_MACH_AMDGCN_GFX909;
   case GK_GFX90A:  return ELF::EF_AMDGPU_MACH_AMDGCN_GFX90A;
   case GK_GFX90C:  return ELF::EF_AMDGPU_MACH_AMDGCN_GFX90C;
+  case GK_GFX940:  return ELF::EF_AMDGPU_MACH_AMDGCN_GFX940;
   case GK_GFX1010: return ELF::EF_AMDGPU_MACH_AMDGCN_GFX1010;
   case GK_GFX1011: return ELF::EF_AMDGPU_MACH_AMDGCN_GFX1011;
   case GK_GFX1012: return ELF::EF_AMDGPU_MACH_AMDGCN_GFX1012;
+  case GK_GFX1013: return ELF::EF_AMDGPU_MACH_AMDGCN_GFX1013;
   case GK_GFX1030: return ELF::EF_AMDGPU_MACH_AMDGCN_GFX1030;
   case GK_GFX1031: return ELF::EF_AMDGPU_MACH_AMDGCN_GFX1031;
   case GK_GFX1032: return ELF::EF_AMDGPU_MACH_AMDGCN_GFX1032;
   case GK_GFX1033: return ELF::EF_AMDGPU_MACH_AMDGCN_GFX1033;
   case GK_GFX1034: return ELF::EF_AMDGPU_MACH_AMDGCN_GFX1034;
+  case GK_GFX1035: return ELF::EF_AMDGPU_MACH_AMDGCN_GFX1035;
+  case GK_GFX1036: return ELF::EF_AMDGPU_MACH_AMDGCN_GFX1036;
   case GK_NONE:    return ELF::EF_AMDGPU_MACH_NONE;
   }
 
@@ -315,6 +327,10 @@ void AMDGPUTargetAsmStreamer::EmitAmdhsaKernelDescriptor(
      << KD.private_segment_fixed_size << '\n';
   OS << "\t\t.amdhsa_kernarg_size " << KD.kernarg_size << '\n';
 
+  PRINT_FIELD(OS, ".amdhsa_user_sgpr_count", KD,
+              compute_pgm_rsrc2,
+              amdhsa::COMPUTE_PGM_RSRC2_USER_SGPR_COUNT);
+
   if (!hasArchitectedFlatScratch(STI))
     PRINT_FIELD(
         OS, ".amdhsa_user_sgpr_private_segment_buffer", KD,
@@ -388,6 +404,7 @@ void AMDGPUTargetAsmStreamer::EmitAmdhsaKernelDescriptor(
       break;
     case ELF::ELFABIVERSION_AMDGPU_HSA_V3:
     case ELF::ELFABIVERSION_AMDGPU_HSA_V4:
+    case ELF::ELFABIVERSION_AMDGPU_HSA_V5:
       if (getTargetID()->isXnackSupported())
         OS << "\t\t.amdhsa_reserve_xnack_mask " << getTargetID()->isXnackOnOrAny() << '\n';
       break;
@@ -430,6 +447,8 @@ void AMDGPUTargetAsmStreamer::EmitAmdhsaKernelDescriptor(
     PRINT_FIELD(OS, ".amdhsa_forward_progress", KD,
                 compute_pgm_rsrc1,
                 amdhsa::COMPUTE_PGM_RSRC1_FWD_PROGRESS);
+    PRINT_FIELD(OS, ".amdhsa_shared_vgpr_count", KD, compute_pgm_rsrc3,
+                amdhsa::COMPUTE_PGM_RSRC3_GFX10_SHARED_VGPR_COUNT);
   }
   PRINT_FIELD(
       OS, ".amdhsa_exception_fp_ieee_invalid_op", KD,
@@ -570,6 +589,7 @@ unsigned AMDGPUTargetELFStreamer::getEFlagsAMDHSA() {
     case ELF::ELFABIVERSION_AMDGPU_HSA_V3:
       return getEFlagsV3();
     case ELF::ELFABIVERSION_AMDGPU_HSA_V4:
+    case ELF::ELFABIVERSION_AMDGPU_HSA_V5:
       return getEFlagsV4();
     }
   }
@@ -681,7 +701,7 @@ AMDGPUTargetELFStreamer::EmitDirectiveHSACodeObjectISAV2(uint32_t Major,
              OS.emitBytes(VendorName);
              OS.emitInt8(0); // NULL terminate VendorName
              OS.emitBytes(ArchName);
-             OS.emitInt8(0); // NULL terminte ArchName
+             OS.emitInt8(0); // NULL terminate ArchName
            });
 }
 

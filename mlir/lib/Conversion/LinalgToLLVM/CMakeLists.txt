@@ -16,9 +16,10 @@ add_mlir_conversion_library(MLIRLinalgToLLVM
   MLIRAffineToStandard
   MLIRIR
   MLIRLinalg
+  MLIRLLVMCommonConversion
   MLIRLLVMIR
-  MLIRSCFToStandard
-  MLIRStandardToLLVM
+  MLIRMemRefToLLVM
+  MLIRSCFToControlFlow
   MLIRTransforms
   MLIRVectorToLLVM
   MLIRVectorToSCF

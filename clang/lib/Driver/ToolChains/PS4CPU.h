@@ -23,7 +23,8 @@ namespace PS4cpu {
 void addProfileRTArgs(const ToolChain &TC, const llvm::opt::ArgList &Args,
                       llvm::opt::ArgStringList &CmdArgs);
 
-void addSanitizerArgs(const ToolChain &TC, llvm::opt::ArgStringList &CmdArgs);
+void addSanitizerArgs(const ToolChain &TC, const llvm::opt::ArgList &Args,
+                      llvm::opt::ArgStringList &CmdArgs);
 
 class LLVM_LIBRARY_VISIBILITY Assemble : public Tool {
 public:
@@ -32,8 +33,7 @@ public:
   bool hasIntegratedCPP() const override { return false; }
 
   void ConstructJob(Compilation &C, const JobAction &JA,
-                    const InputInfo &Output,
-                    const InputInfoList &Inputs,
+                    const InputInfo &Output, const InputInfoList &Inputs,
                     const llvm::opt::ArgList &TCArgs,
                     const char *LinkingOutput) const override;
 };
@@ -46,8 +46,7 @@ public:
   bool isLinkJob() const override { return true; }
 
   void ConstructJob(Compilation &C, const JobAction &JA,
-                    const InputInfo &Output,
-                    const InputInfoList &Inputs,
+                    const InputInfo &Output, const InputInfoList &Inputs,
                     const llvm::opt::ArgList &TCArgs,
                     const char *LinkingOutput) const override;
 };
@@ -62,12 +61,12 @@ public:
          const llvm::opt::ArgList &Args);
 
   // No support for finding a C++ standard library yet.
-  void addLibCxxIncludePaths(
-      const llvm::opt::ArgList &DriverArgs,
-      llvm::opt::ArgStringList &CC1Args) const override {}
-  void addLibStdCxxIncludePaths(
-      const llvm::opt::ArgList &DriverArgs,
-      llvm::opt::ArgStringList &CC1Args) const override {}
+  void addLibCxxIncludePaths(const llvm::opt::ArgList &DriverArgs,
+                             llvm::opt::ArgStringList &CC1Args) const override {
+  }
+  void
+  addLibStdCxxIncludePaths(const llvm::opt::ArgList &DriverArgs,
+                           llvm::opt::ArgStringList &CC1Args) const override {}
 
   bool IsMathErrnoDefault() const override { return false; }
   bool IsObjCNonFragileABIDefault() const override { return true; }
@@ -79,6 +78,7 @@ public:
     return LangOptions::SSPStrong;
   }
 
+  unsigned GetDefaultDwarfVersion() const override { return 4; }
   llvm::DebuggerKind getDefaultDebuggerTuning() const override {
     return llvm::DebuggerKind::SCE;
   }
@@ -90,9 +90,8 @@ public:
   bool canSplitThinLTOUnit() const override { return false; }
 
   void addClangTargetOptions(
-    const llvm::opt::ArgList &DriverArgs,
-    llvm::opt::ArgStringList &CC1Args,
-    Action::OffloadKind DeviceOffloadingKind) const override;
+      const llvm::opt::ArgList &DriverArgs, llvm::opt::ArgStringList &CC1Args,
+      Action::OffloadKind DeviceOffloadingKind) const override;
 
   llvm::DenormalMode getDefaultDenormalModeForType(
       const llvm::opt::ArgList &DriverArgs, const JobAction &JA,

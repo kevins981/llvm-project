@@ -16,7 +16,7 @@
 #include "llvm/ADT/SmallSet.h"
 #include "llvm/CodeGen/MachineBasicBlock.h"
 #include "llvm/CodeGen/Register.h"
-#include "llvm/CodeGen/GlobalISel/RegisterBankInfo.h"
+#include "llvm/CodeGen/RegisterBankInfo.h"
 
 #define GET_REGBANK_DECLARATIONS
 #include "AMDGPUGenRegisterBank.inc"
@@ -81,17 +81,13 @@ public:
                     MachineRegisterInfo &MRI, int RSrcIdx) const;
   bool applyMappingSBufferLoad(const OperandsMapper &OpdMapper) const;
 
-  bool applyMappingBFEIntrinsic(const OperandsMapper &OpdMapper,
-                                bool Signed) const;
+  bool applyMappingBFE(const OperandsMapper &OpdMapper, bool Signed) const;
 
   Register handleD16VData(MachineIRBuilder &B, MachineRegisterInfo &MRI,
                           Register Reg) const;
 
   std::pair<Register, unsigned>
   splitBufferOffsets(MachineIRBuilder &B, Register Offset) const;
-
-  MachineInstr *selectStoreIntrinsic(MachineIRBuilder &B,
-                                     MachineInstr &MI) const;
 
   /// See RegisterBankInfo::applyMapping.
   void applyMappingImpl(const OperandsMapper &OpdMapper) const override;

@@ -14,19 +14,19 @@
 #ifndef MLIR_DIALECT_GPU_GPUDIALECT_H
 #define MLIR_DIALECT_GPU_GPUDIALECT_H
 
+#include "mlir/Dialect/Arithmetic/IR/Arithmetic.h"
 #include "mlir/Dialect/DLTI/Traits.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/Dialect.h"
-#include "mlir/IR/FunctionSupport.h"
+#include "mlir/IR/FunctionInterfaces.h"
 #include "mlir/IR/OpDefinition.h"
 #include "mlir/IR/OpImplementation.h"
 #include "mlir/IR/SymbolTable.h"
+#include "mlir/Interfaces/InferTypeOpInterface.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 
 namespace mlir {
-class FuncOp;
-
 namespace gpu {
 
 /// Utility class for the GPU dialect to represent triples of `Value`s
@@ -39,6 +39,14 @@ struct KernelDim3 {
 
 class AsyncTokenType
     : public Type::TypeBase<AsyncTokenType, Type, TypeStorage> {
+public:
+  // Used for generic hooks in TypeBase.
+  using Base::Base;
+};
+
+/// Device-side token storage type. There is only one type of device-side token.
+class DeviceAsyncTokenType
+    : public Type::TypeBase<DeviceAsyncTokenType, Type, TypeStorage> {
 public:
   // Used for generic hooks in TypeBase.
   using Base::Base;
@@ -85,9 +93,9 @@ struct MMAMatrixStorageType : public TypeStorage {
   Type elementType;
 
   /// MMA operand that this MMAMatrix holds. The general form of operation this
-  /// type supports is given by the equation D = (alpha*(A*B)) + (beta*C). This
-  /// field specifies which operand in the given equation is held by this type.
-  /// The valid values are "AOp", "BOp", "COp" and "DOp".
+  /// type supports is given by the equation C += A*B. This field specifies
+  /// which operand in the given equation is held by this type. The valid values
+  /// are "AOp", "BOp" and "COp".
   StringRef operand;
 };
 
@@ -112,13 +120,13 @@ struct MMAMatrixStorageType : public TypeStorage {
 /// and 8 f32s for f32 data type of MMAMatrix. Some other instances of usage
 /// are:-
 ///
-///   %3 = gpu.subgroup_mma_compute %0, %1, %2 : !gpu.mma_matrix<16x16xf16,
-///   "AOp">, !gpu.mma_matrix<16x16xf16, "BOp">, !gpu.mma_matrix<16x16xf32,
-///                             "COp"> -> !gpu.mma_matrix<16x16xf32, "DOp">
+///   %3 = gpu.subgroup_mma_compute %0, %1, %2 :
+///   !gpu.mma_matrix<16x16xf16, "AOp">, !gpu.mma_matrix<16x16xf16, "BOp">
+///    -> !gpu.mma_matrix<16x16xf32, "COp">
 ///
 ///
 ///   gpu.subgroup_mma_store_matrix %3, %arg22[%c0, %c0] {leadDimension = 16
-///           : index}: !gpu.mma_matrix<16x16xf32, "DOp">, memref<16x16xf32>
+///           : index}: !gpu.mma_matrix<16x16xf32, "COp">, memref<16x16xf32>
 // TODO: consider moving this to ODS.
 class MMAMatrixType
     : public Type::TypeBase<MMAMatrixType, Type, MMAMatrixStorageType> {
@@ -154,21 +162,25 @@ public:
   Type getElementType() const;
 
   /// The general form of operation this type supports is given by the equation
-  /// D = (alpha*(A*B)) + (beta*C). This function returns which operand in the
-  /// given equation is held by this type. String returned can be one of"AOp",
-  /// "BOp", "COp" and "DOp".
+  /// C += A*B. This function returns which operand in the given equation is
+  /// held by this type. String returned can be one of"AOp", "BOp" and "COp".
   StringRef getOperand() const;
 };
 
 // Adds a `gpu.async.token` to the front of the argument list.
 void addAsyncDependency(Operation *op, Value token);
 
-} // end namespace gpu
-} // end namespace mlir
+} // namespace gpu
+} // namespace mlir
+
+#include "mlir/Dialect/GPU/GPUOpsEnums.h.inc"
 
 #include "mlir/Dialect/GPU/GPUOpsDialect.h.inc"
 
 #include "mlir/Dialect/GPU/GPUOpInterfaces.h.inc"
+
+#define GET_ATTRDEF_CLASSES
+#include "mlir/Dialect/GPU/GPUOpsAttributes.h.inc"
 
 #define GET_OP_CLASSES
 #include "mlir/Dialect/GPU/GPUOps.h.inc"

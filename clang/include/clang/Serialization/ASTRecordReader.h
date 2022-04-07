@@ -326,6 +326,11 @@ public:
   /// Reads attributes from the current stream position, advancing Idx.
   void readAttributes(AttrVec &Attrs);
 
+  /// Read an BTFTypeTagAttr object.
+  BTFTypeTagAttr *readBTFTypeTagAttr() {
+    return cast<BTFTypeTagAttr>(readAttr());
+  }
+
   /// Reads a token out of a record, advancing Idx.
   Token readToken() {
     return Reader->ReadToken(*F, Record, Idx);
@@ -350,7 +355,7 @@ struct SavedStreamPosition {
   ~SavedStreamPosition() {
     if (llvm::Error Err = Cursor.JumpToBit(Offset))
       llvm::report_fatal_error(
-          "Cursor should always be able to go back, failed: " +
+          llvm::Twine("Cursor should always be able to go back, failed: ") +
           toString(std::move(Err)));
   }
 

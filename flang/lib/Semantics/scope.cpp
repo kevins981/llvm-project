@@ -215,7 +215,7 @@ const DeclTypeSpec *Scope::GetType(const SomeExpr &expr) {
       case TypeCategory::Complex:
         return &MakeNumericType(dyType->category(), KindExpr{dyType->kind()});
       case TypeCategory::Character:
-        if (const ParamValue * lenParam{dyType->charLength()}) {
+        if (const ParamValue * lenParam{dyType->charLengthParamValue()}) {
           return &MakeCharacterType(
               ParamValue{*lenParam}, KindExpr{dyType->kind()});
         } else {
@@ -285,7 +285,7 @@ void Scope::add_importName(const SourceName &name) {
 
 // true if name can be imported or host-associated from parent scope.
 bool Scope::CanImport(const SourceName &name) const {
-  if (IsGlobal() || parent_.IsGlobal()) {
+  if (IsTopLevel() || parent_.IsTopLevel()) {
     return false;
   }
   switch (GetImportKind()) {
@@ -306,7 +306,7 @@ const Scope *Scope::FindScope(parser::CharBlock source) const {
 
 Scope *Scope::FindScope(parser::CharBlock source) {
   bool isContained{sourceRange_.Contains(source)};
-  if (!isContained && !IsGlobal() && !IsModuleFile()) {
+  if (!isContained && !IsTopLevel() && !IsModuleFile()) {
     return nullptr;
   }
   for (auto &child : children_) {
@@ -314,11 +314,11 @@ Scope *Scope::FindScope(parser::CharBlock source) {
       return scope;
     }
   }
-  return isContained ? this : nullptr;
+  return isContained && !IsTopLevel() ? this : nullptr;
 }
 
 void Scope::AddSourceRange(const parser::CharBlock &source) {
-  for (auto *scope = this; !scope->IsGlobal(); scope = &scope->parent()) {
+  for (auto *scope{this}; !scope->IsGlobal(); scope = &scope->parent()) {
     scope->sourceRange_.ExtendToCover(source);
   }
 }
@@ -369,6 +369,25 @@ bool Scope::IsParameterizedDerivedType() const {
   for (const auto &pair : symbols_) {
     if (pair.second->has<TypeParamDetails>()) {
       return true;
+    }
+  }
+  return false;
+}
+
+bool Scope::IsDerivedTypeWithKindParameter() const {
+  if (!IsDerivedType()) {
+    return false;
+  }
+  if (const Scope * parent{GetDerivedTypeParent()}) {
+    if (parent->IsDerivedTypeWithKindParameter()) {
+      return true;
+    }
+  }
+  for (const auto &pair : symbols_) {
+    if (const auto *typeParam{pair.second->detailsIf<TypeParamDetails>()}) {
+      if (typeParam->attr() == common::TypeParamAttr::Kind) {
+        return true;
+      }
     }
   }
   return false;

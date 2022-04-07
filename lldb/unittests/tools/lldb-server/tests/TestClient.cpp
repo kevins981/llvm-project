@@ -102,8 +102,7 @@ Expected<std::unique_ptr<TestClient>> TestClient::launchCustom(StringRef Log, Ar
   // TODO: Use this callback to detect botched launches. If lldb-server does not
   // start, we can print a nice error message here instead of hanging in
   // Accept().
-  Info.SetMonitorProcessCallback(&ProcessLaunchInfo::NoOpMonitorCallback,
-                                 false);
+  Info.SetMonitorProcessCallback(&ProcessLaunchInfo::NoOpMonitorCallback);
 
   status = Host::LaunchProcess(Info);
   if (status.Fail())
@@ -193,7 +192,7 @@ Error TestClient::SendMessage(StringRef message, std::string &response_string,
                               PacketResult expected_result) {
   StringExtractorGDBRemote response;
   GTEST_LOG_(INFO) << "Send Packet: " << message.str();
-  PacketResult result = SendPacketAndWaitForResponse(message, response, false);
+  PacketResult result = SendPacketAndWaitForResponse(message, response);
   response.GetEscapedBinaryData(response_string);
   GTEST_LOG_(INFO) << "Read Packet: " << response_string;
   if (result != expected_result)

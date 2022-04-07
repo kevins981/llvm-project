@@ -15,14 +15,12 @@
 #include "llvm/Transforms/Utils/SCCPSolver.h"
 #include "llvm/Analysis/ConstantFolding.h"
 #include "llvm/Analysis/InstructionSimplify.h"
-#include "llvm/Analysis/ValueTracking.h"
-#include "llvm/InitializePasses.h"
-#include "llvm/Pass.h"
+#include "llvm/Analysis/ValueLattice.h"
+#include "llvm/IR/InstVisitor.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
-#include "llvm/Transforms/Utils/Local.h"
 #include <cassert>
 #include <utility>
 #include <vector>
@@ -307,8 +305,6 @@ private:
   void visitLoadInst(LoadInst &I);
   void visitGetElementPtrInst(GetElementPtrInst &I);
 
-  void visitCallInst(CallInst &I) { visitCallBase(I); }
-
   void visitInvokeInst(InvokeInst &II) {
     visitCallBase(II);
     visitTerminator(II);
@@ -333,6 +329,8 @@ public:
   void addAnalysis(Function &F, AnalysisResultsForFn A) {
     AnalysisResults.insert({&F, std::move(A)});
   }
+
+  void visitCallInst(CallInst &I) { visitCallBase(I); }
 
   bool markBlockExecutable(BasicBlock *BB);
 
@@ -447,6 +445,18 @@ public:
   bool isStructLatticeConstant(Function *F, StructType *STy);
 
   Constant *getConstant(const ValueLatticeElement &LV) const;
+
+  SmallPtrSetImpl<Function *> &getArgumentTrackedFunctions() {
+    return TrackingIncomingArguments;
+  }
+
+  void markArgInFuncSpecialization(Function *F,
+                                   const SmallVectorImpl<ArgInfo> &Args);
+
+  void markFunctionUnreachable(Function *F) {
+    for (auto &BB : *F)
+      BBExecutable.erase(&BB);
+  }
 };
 
 } // namespace llvm
@@ -513,6 +523,40 @@ Constant *SCCPInstVisitor::getConstant(const ValueLatticeElement &LV) const {
       return ConstantInt::get(Ctx, *CR.getSingleElement());
   }
   return nullptr;
+}
+
+void SCCPInstVisitor::markArgInFuncSpecialization(
+    Function *F, const SmallVectorImpl<ArgInfo> &Args) {
+  assert(!Args.empty() && "Specialization without arguments");
+  assert(F->arg_size() == Args[0].Formal->getParent()->arg_size() &&
+         "Functions should have the same number of arguments");
+
+  auto Iter = Args.begin();
+  Argument *NewArg = F->arg_begin();
+  Argument *OldArg = Args[0].Formal->getParent()->arg_begin();
+  for (auto End = F->arg_end(); NewArg != End; ++NewArg, ++OldArg) {
+
+    LLVM_DEBUG(dbgs() << "SCCP: Marking argument "
+                      << NewArg->getNameOrAsOperand() << "\n");
+
+    if (OldArg == Iter->Formal) {
+      // Mark the argument constants in the new function.
+      markConstant(NewArg, Iter->Actual);
+      ++Iter;
+    } else if (ValueState.count(OldArg)) {
+      // For the remaining arguments in the new function, copy the lattice state
+      // over from the old function.
+      //
+      // Note: This previously looked like this:
+      // ValueState[NewArg] = ValueState[OldArg];
+      // This is incorrect because the DenseMap class may resize the underlying
+      // memory when inserting `NewArg`, which will invalidate the reference to
+      // `OldArg`. Instead, we make sure `NewArg` exists before setting it.
+      auto &NewValue = ValueState[NewArg];
+      NewValue = ValueState[OldArg];
+      pushToWorkList(NewValue, NewArg);
+    }
+  }
 }
 
 void SCCPInstVisitor::visitInstruction(Instruction &I) {
@@ -772,6 +816,9 @@ void SCCPInstVisitor::visitCastInst(CastInst &I) {
     return;
 
   ValueLatticeElement OpSt = getValueState(I.getOperand(0));
+  if (OpSt.isUnknownOrUndef())
+    return;
+
   if (Constant *OpC = getConstant(OpSt)) {
     // Fold the constant as we build.
     Constant *C = ConstantFoldCastOperand(I.getOpcode(), OpC, I.getType(), DL);
@@ -779,9 +826,14 @@ void SCCPInstVisitor::visitCastInst(CastInst &I) {
       return;
     // Propagate constant value
     markConstant(&I, C);
-  } else if (OpSt.isConstantRange() && I.getDestTy()->isIntegerTy()) {
+  } else if (I.getDestTy()->isIntegerTy()) {
     auto &LV = getValueState(&I);
-    ConstantRange OpRange = OpSt.getConstantRange();
+    ConstantRange OpRange =
+        OpSt.isConstantRange()
+            ? OpSt.getConstantRange()
+            : ConstantRange::getFull(
+                  I.getOperand(0)->getType()->getScalarSizeInBits());
+
     Type *DestTy = I.getDestTy();
     // Vectors where all elements have the same known constant range are treated
     // as a single constant range in the lattice. When bitcasting such vectors,
@@ -796,7 +848,7 @@ void SCCPInstVisitor::visitCastInst(CastInst &I) {
     ConstantRange Res =
         OpRange.castOp(I.getOpcode(), DL.getTypeSizeInBits(DestTy));
     mergeInValue(LV, &I, ValueLatticeElement::getRange(Res));
-  } else if (!OpSt.isUnknownOrUndef())
+  } else
     markOverdefined(&I);
 }
 
@@ -1153,10 +1205,10 @@ void SCCPInstVisitor::handleCallOverdefined(CallBase &CB) {
   // a declaration, maybe we can constant fold it.
   if (F && F->isDeclaration() && canConstantFoldCallTo(&CB, F)) {
     SmallVector<Constant *, 8> Operands;
-    for (auto AI = CB.arg_begin(), E = CB.arg_end(); AI != E; ++AI) {
-      if (AI->get()->getType()->isStructTy())
+    for (const Use &A : CB.args()) {
+      if (A.get()->getType()->isStructTy())
         return markOverdefined(&CB); // Can't handle struct args.
-      ValueLatticeElement State = getValueState(*AI);
+      ValueLatticeElement State = getValueState(A);
 
       if (State.isUnknownOrUndef())
         return; // Operands are not resolved yet.
@@ -1574,7 +1626,7 @@ SCCPSolver::SCCPSolver(
     LLVMContext &Ctx)
     : Visitor(new SCCPInstVisitor(DL, std::move(GetTLI), Ctx)) {}
 
-SCCPSolver::~SCCPSolver() { }
+SCCPSolver::~SCCPSolver() = default;
 
 void SCCPSolver::addAnalysis(Function &F, AnalysisResultsForFn A) {
   return Visitor->addAnalysis(F, std::move(A));
@@ -1664,3 +1716,20 @@ bool SCCPSolver::isStructLatticeConstant(Function *F, StructType *STy) {
 Constant *SCCPSolver::getConstant(const ValueLatticeElement &LV) const {
   return Visitor->getConstant(LV);
 }
+
+SmallPtrSetImpl<Function *> &SCCPSolver::getArgumentTrackedFunctions() {
+  return Visitor->getArgumentTrackedFunctions();
+}
+
+void SCCPSolver::markArgInFuncSpecialization(
+    Function *F, const SmallVectorImpl<ArgInfo> &Args) {
+  Visitor->markArgInFuncSpecialization(F, Args);
+}
+
+void SCCPSolver::markFunctionUnreachable(Function *F) {
+  Visitor->markFunctionUnreachable(F);
+}
+
+void SCCPSolver::visit(Instruction *I) { Visitor->visit(I); }
+
+void SCCPSolver::visitCall(CallInst &I) { Visitor->visitCall(I); }

@@ -29,7 +29,7 @@ M68kTargetInfo::M68kTargetInfo(const llvm::Triple &Triple,
                                const TargetOptions &)
     : TargetInfo(Triple) {
 
-  std::string Layout = "";
+  std::string Layout;
 
   // M68k is Big Endian
   Layout += "E";
@@ -37,8 +37,8 @@ M68kTargetInfo::M68kTargetInfo(const llvm::Triple &Triple,
   // FIXME how to wire it with the used object format?
   Layout += "-m:e";
 
-  // M68k pointers are always 32 bit wide even for 16 bit cpus
-  Layout += "-p:32:32";
+  // M68k pointers are always 32 bit wide even for 16-bit CPUs
+  Layout += "-p:32:16:32";
 
   // M68k integer data types
   Layout += "-i8:8:8-i16:16:16-i32:16:32";
@@ -189,6 +189,30 @@ bool M68kTargetInfo::validateAsmConstraint(
     break;
   }
   return false;
+}
+
+llvm::Optional<std::string>
+M68kTargetInfo::handleAsmEscapedChar(char EscChar) const {
+  char C;
+  switch (EscChar) {
+  case '.':
+  case '#':
+    C = EscChar;
+    break;
+  case '/':
+    C = '%';
+    break;
+  case '$':
+    C = 's';
+    break;
+  case '&':
+    C = 'd';
+    break;
+  default:
+    return llvm::None;
+  }
+
+  return std::string(1, C);
 }
 
 std::string M68kTargetInfo::convertConstraint(const char *&Constraint) const {

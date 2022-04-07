@@ -20,7 +20,6 @@
 
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/MapVector.h"
-#include "llvm/ADT/None.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/PassManager.h"
 
@@ -30,7 +29,6 @@ class AAResults;
 class AssumptionCache;
 class BasicBlock;
 class CmpInst;
-class DataLayout;
 class DemandedBits;
 class DominatorTree;
 class Function;
@@ -94,9 +92,11 @@ private:
   bool tryToVectorizePair(Value *A, Value *B, slpvectorizer::BoUpSLP &R);
 
   /// Try to vectorize a list of operands.
+  /// \param LimitForRegisterSize Vectorize only using maximal allowed register
+  /// size.
   /// \returns true if a value was vectorized.
   bool tryToVectorizeList(ArrayRef<Value *> VL, slpvectorizer::BoUpSLP &R,
-                          bool AllowReorder = false);
+                          bool LimitForRegisterSize = false);
 
   /// Try to vectorize a chain that may start at the operands of \p I.
   bool tryToVectorize(Instruction *I, slpvectorizer::BoUpSLP &R);

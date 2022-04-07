@@ -1,4 +1,4 @@
-//===- unittests/Frontend/PrintPreprocessedTest.cpp  FrontendAction tests--===//
+//===- unittests/Frontend/FrontendActionTest.cpp  FrontendAction tests-----===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -11,6 +11,7 @@
 #include "flang/Frontend/FrontendOptions.h"
 #include "flang/FrontendTool/Utils.h"
 #include "llvm/Support/FileSystem.h"
+#include "llvm/Support/TargetSelect.h"
 #include "llvm/Support/raw_ostream.h"
 
 #include "gtest/gtest.h"
@@ -62,7 +63,7 @@ protected:
     invocation_ = std::make_shared<CompilerInvocation>();
 
     compInst_.set_invocation(std::move(invocation_));
-    compInst_.frontendOpts().inputs_.push_back(
+    compInst_.frontendOpts().inputs.push_back(
         FrontendInputFile(inputFilePath_, Language::Fortran));
   }
 
@@ -86,7 +87,7 @@ TEST_F(FrontendActionTest, TestInputOutput) {
   inputFileOs_.reset();
 
   // Set-up the action kind.
-  compInst_.invocation().frontendOpts().programAction_ = InputOutputTest;
+  compInst_.invocation().frontendOpts().programAction = InputOutputTest;
 
   // Set-up the output stream. Using output buffer wrapped as an output
   // stream, as opposed to an actual file (or a file descriptor).
@@ -115,7 +116,8 @@ TEST_F(FrontendActionTest, PrintPreprocessedInput) {
   inputFileOs_.reset();
 
   // Set-up the action kind.
-  compInst_.invocation().frontendOpts().programAction_ = PrintPreprocessedInput;
+  compInst_.invocation().frontendOpts().programAction = PrintPreprocessedInput;
+  compInst_.invocation().preprocessorOpts().noReformat = true;
 
   // Set-up the output stream. We are using output buffer wrapped as an output
   // stream, as opposed to an actual file (or a file descriptor).
@@ -141,7 +143,7 @@ TEST_F(FrontendActionTest, ParseSyntaxOnly) {
   inputFileOs_.reset();
 
   // Set-up the action kind.
-  compInst_.invocation().frontendOpts().programAction_ = ParseSyntaxOnly;
+  compInst_.invocation().frontendOpts().programAction = ParseSyntaxOnly;
 
   // Set-up the output stream for the semantic diagnostics.
   llvm::SmallVector<char, 256> outputDiagBuffer;
@@ -159,5 +161,63 @@ TEST_F(FrontendActionTest, ParseSyntaxOnly) {
       llvm::StringRef(outputDiagBuffer.data())
           .contains(
               ":1:14: error: IF statement is not allowed in IF statement\n"));
+}
+
+TEST_F(FrontendActionTest, EmitLLVM) {
+  // Populate the input file with the pre-defined input and flush it.
+  *(inputFileOs_) << "end program";
+  inputFileOs_.reset();
+
+  // Set-up the action kind.
+  compInst_.invocation().frontendOpts().programAction = EmitLLVM;
+  compInst_.invocation().preprocessorOpts().noReformat = true;
+
+  // Set-up the output stream. We are using output buffer wrapped as an output
+  // stream, as opposed to an actual file (or a file descriptor).
+  llvm::SmallVector<char> outputFileBuffer;
+  std::unique_ptr<llvm::raw_pwrite_stream> outputFileStream(
+      new llvm::raw_svector_ostream(outputFileBuffer));
+  compInst_.set_outputStream(std::move(outputFileStream));
+
+  // Execute the action.
+  bool success = ExecuteCompilerInvocation(&compInst_);
+
+  // Validate the expected output.
+  EXPECT_TRUE(success);
+  EXPECT_TRUE(!outputFileBuffer.empty());
+
+  EXPECT_TRUE(llvm::StringRef(outputFileBuffer.data())
+                  .contains("define void @_QQmain()"));
+}
+
+TEST_F(FrontendActionTest, EmitAsm) {
+  // Populate the input file with the pre-defined input and flush it.
+  *(inputFileOs_) << "end program";
+  inputFileOs_.reset();
+
+  // Set-up the action kind.
+  compInst_.invocation().frontendOpts().programAction = EmitAssembly;
+  compInst_.invocation().preprocessorOpts().noReformat = true;
+
+  // Initialise LLVM backend
+  llvm::InitializeAllTargets();
+  llvm::InitializeAllTargetMCs();
+  llvm::InitializeAllAsmPrinters();
+
+  // Set-up the output stream. We are using output buffer wrapped as an output
+  // stream, as opposed to an actual file (or a file descriptor).
+  llvm::SmallVector<char, 256> outputFileBuffer;
+  std::unique_ptr<llvm::raw_pwrite_stream> outputFileStream(
+      new llvm::raw_svector_ostream(outputFileBuffer));
+  compInst_.set_outputStream(std::move(outputFileStream));
+
+  // Execute the action.
+  bool success = ExecuteCompilerInvocation(&compInst_);
+
+  // Validate the expected output.
+  EXPECT_TRUE(success);
+  EXPECT_TRUE(!outputFileBuffer.empty());
+
+  EXPECT_TRUE(llvm::StringRef(outputFileBuffer.data()).contains("_QQmain"));
 }
 } // namespace

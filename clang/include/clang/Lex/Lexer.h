@@ -13,7 +13,6 @@
 #ifndef LLVM_CLANG_LEX_LEXER_H
 #define LLVM_CLANG_LEX_LEXER_H
 
-#include "clang/Basic/LangOptions.h"
 #include "clang/Basic/SourceLocation.h"
 #include "clang/Basic/TokenKinds.h"
 #include "clang/Lex/PreprocessorLexer.h"
@@ -36,6 +35,7 @@ namespace clang {
 class DiagnosticBuilder;
 class Preprocessor;
 class SourceManager;
+class LangOptions;
 
 /// ConflictMarkerKind - Kinds of conflict marker which the lexer might be
 /// recovering from.
@@ -90,8 +90,18 @@ class Lexer : public PreprocessorLexer {
   // Location for start of file.
   SourceLocation FileLoc;
 
-  // LangOpts enabled by this language (cache).
-  LangOptions LangOpts;
+  // LangOpts enabled by this language.
+  // Storing LangOptions as reference here is important from performance point
+  // of view. Lack of reference means that LangOptions copy constructor would be
+  // called by Lexer(..., const LangOptions &LangOpts,...). Given that local
+  // Lexer objects are created thousands times (in Lexer::getRawToken,
+  // Preprocessor::EnterSourceFile and other places) during single module
+  // processing in frontend it would make std::vector<std::string> copy
+  // constructors surprisingly hot.
+  const LangOptions &LangOpts;
+
+  // True if '//' line comments are enabled.
+  bool LineComment;
 
   // True if lexer for _Pragma handling.
   bool Is_PragmaLexer;
@@ -128,6 +138,9 @@ class Lexer : public PreprocessorLexer {
 
   bool HasLeadingEmptyMacro;
 
+  /// True if this is the first time we're lexing the input file.
+  bool IsFirstTimeLexingFile;
+
   // NewLinePtr - A pointer to new line character '\n' being lexed. For '\r\n',
   // it also points to '\n.'
   const char *NewLinePtr;
@@ -142,19 +155,22 @@ public:
   /// with the specified preprocessor managing the lexing process.  This lexer
   /// assumes that the associated file buffer and Preprocessor objects will
   /// outlive it, so it doesn't take ownership of either of them.
-  Lexer(FileID FID, const llvm::MemoryBufferRef &InputFile, Preprocessor &PP);
+  Lexer(FileID FID, const llvm::MemoryBufferRef &InputFile, Preprocessor &PP,
+        bool IsFirstIncludeOfFile = true);
 
   /// Lexer constructor - Create a new raw lexer object.  This object is only
   /// suitable for calls to 'LexFromRawLexer'.  This lexer assumes that the
   /// text range will outlive it, so it doesn't take ownership of it.
   Lexer(SourceLocation FileLoc, const LangOptions &LangOpts,
-        const char *BufStart, const char *BufPtr, const char *BufEnd);
+        const char *BufStart, const char *BufPtr, const char *BufEnd,
+        bool IsFirstIncludeOfFile = true);
 
   /// Lexer constructor - Create a new raw lexer object.  This object is only
   /// suitable for calls to 'LexFromRawLexer'.  This lexer assumes that the
   /// text range will outlive it, so it doesn't take ownership of it.
   Lexer(FileID FID, const llvm::MemoryBufferRef &FromFile,
-        const SourceManager &SM, const LangOptions &LangOpts);
+        const SourceManager &SM, const LangOptions &LangOpts,
+        bool IsFirstIncludeOfFile = true);
 
   Lexer(const Lexer &) = delete;
   Lexer &operator=(const Lexer &) = delete;
@@ -166,10 +182,6 @@ public:
                                    SourceLocation ExpansionLocStart,
                                    SourceLocation ExpansionLocEnd,
                                    unsigned TokLen, Preprocessor &PP);
-
-  /// getLangOpts - Return the language features currently enabled.
-  /// NOTE: this lexer modifies features as a file is parsed!
-  const LangOptions &getLangOpts() const { return LangOpts; }
 
   /// getFileLoc - Return the File Location for the file we are lexing out of.
   /// The physical location encodes the location where the characters come from,
@@ -536,7 +548,8 @@ public:
                                          bool SkipTrailingWhitespaceAndNewLine);
 
   /// Returns true if the given character could appear in an identifier.
-  static bool isIdentifierBodyChar(char c, const LangOptions &LangOpts);
+  static bool isAsciiIdentifierContinueChar(char c,
+                                            const LangOptions &LangOpts);
 
   /// Checks whether new line pointed by Str is preceded by escape
   /// sequence.
@@ -562,6 +575,9 @@ public:
   static StringRef getIndentationForLine(SourceLocation Loc,
                                          const SourceManager &SM);
 
+  /// Check if this is the first time we're lexing the input file.
+  bool isFirstTimeLexingFile() const { return IsFirstTimeLexingFile; }
+
 private:
   //===--------------------------------------------------------------------===//
   // Internal implementation interfaces.
@@ -573,10 +589,7 @@ private:
 
   bool CheckUnicodeWhitespace(Token &Result, uint32_t C, const char *CurPtr);
 
-  /// Given that a token begins with the Unicode character \p C, figure out
-  /// what kind of token it is and dispatch to the appropriate lexing helper
-  /// function.
-  bool LexUnicode(Token &Result, uint32_t C, const char *CurPtr);
+  bool LexUnicodeIdentifierStart(Token &Result, uint32_t C, const char *CurPtr);
 
   /// FormTokenWithChars - When we lex a token, we have identified a span
   /// starting at BufferPtr, going to TokEnd that forms the token.  This method
@@ -701,7 +714,11 @@ private:
                           bool IsStringLiteral);
 
   // Helper functions to lex the remainder of a token of the specific type.
-  bool LexIdentifier         (Token &Result, const char *CurPtr);
+
+  // This function handles both ASCII and Unicode identifiers after
+  // the first codepoint of the identifyier has been parsed.
+  bool LexIdentifierContinue(Token &Result, const char *CurPtr);
+
   bool LexNumericConstant    (Token &Result, const char *CurPtr);
   bool LexStringLiteral      (Token &Result, const char *CurPtr,
                               tok::TokenKind Kind);

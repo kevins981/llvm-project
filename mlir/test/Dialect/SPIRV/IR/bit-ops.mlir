@@ -25,7 +25,11 @@ func @bit_field_insert_vec(%base: vector<3xi32>, %insert: vector<3xi32>, %offset
 // -----
 
 func @bit_field_insert_invalid_insert_type(%base: vector<3xi32>, %insert: vector<2xi32>, %offset: i32, %count: i16) -> vector<3xi32> {
-  // expected-error @+1 {{all of {base, insert, result} have same type}}
+  // TODO: expand post change in verification order. This is currently only
+  // verifying that the type verification is failing but not the specific error
+  // message. In final state the error should refer to mismatch in base and
+  // insert.
+  // expected-error @+1 {{type}}
   %0 = "spv.BitFieldInsert" (%base, %insert, %offset, %count) : (vector<3xi32>, vector<2xi32>, i32, i16) -> vector<3xi32>
   spv.ReturnValue %0 : vector<3xi32>
 }
@@ -177,7 +181,7 @@ func @shift_left_logical(%arg0: i32, %arg1 : i16) -> i32 {
 // -----
 
 func @shift_left_logical_invalid_result_type(%arg0: i32, %arg1 : i16) -> i16 {
-  // expected-error @+1 {{expected the same type for the first operand and result, but provided 'i32' and 'i16'}}
+  // expected-error @+1 {{op failed to verify that all of {operand1, result} have same type}}
   %0 = "spv.ShiftLeftLogical" (%arg0, %arg1) : (i32, i16) -> (i16)
   spv.ReturnValue %0 : i16
 }

@@ -38,14 +38,26 @@ void MessageFormattedText::Format(const MessageFixedText *text, ...) {
   }
   va_list ap;
   va_start(ap, text);
+#ifdef _MSC_VER
+  // Microsoft has a separate function for "positional arguments", which is
+  // used in some messages.
+  int need{_vsprintf_p(nullptr, 0, p, ap)};
+#else
   int need{vsnprintf(nullptr, 0, p, ap)};
+#endif
+
   CHECK(need >= 0);
   char *buffer{
       static_cast<char *>(std::malloc(static_cast<std::size_t>(need) + 1))};
   CHECK(buffer);
   va_end(ap);
   va_start(ap, text);
+#ifdef _MSC_VER
+  // Use positional argument variant of printf.
+  int need2{_vsprintf_p(buffer, need + 1, p, ap)};
+#else
   int need2{vsnprintf(buffer, need + 1, p, ap)};
+#endif
   CHECK(need2 == need);
   va_end(ap);
   string_ = buffer;
@@ -143,12 +155,14 @@ bool Message::SortBefore(const Message &that) const {
       location_, that.location_);
 }
 
-bool Message::IsFatal() const {
+bool Message::IsFatal() const { return severity() == Severity::Error; }
+
+Severity Message::severity() const {
   return std::visit(
       common::visitors{
-          [](const MessageExpectedText &) { return true; },
-          [](const MessageFixedText &x) { return x.isFatal(); },
-          [](const MessageFormattedText &x) { return x.isFatal(); },
+          [](const MessageExpectedText &) { return Severity::Error; },
+          [](const MessageFixedText &x) { return x.severity(); },
+          [](const MessageFormattedText &x) { return x.severity(); },
       },
       text_);
 }
@@ -191,8 +205,18 @@ void Message::Emit(llvm::raw_ostream &o, const AllCookedSources &allCooked,
     bool echoSourceLine) const {
   std::optional<ProvenanceRange> provenanceRange{GetProvenanceRange(allCooked)};
   std::string text;
-  if (IsFatal()) {
-    text += "error: ";
+  switch (severity()) {
+  case Severity::Error:
+    text = "error: ";
+    break;
+  case Severity::Warning:
+    text = "warning: ";
+    break;
+  case Severity::Portability:
+    text = "portability: ";
+    break;
+  case Severity::None:
+    break;
   }
   text += ToString();
   const AllSources &sources{allCooked.allSources()};

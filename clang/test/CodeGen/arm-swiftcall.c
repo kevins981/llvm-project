@@ -1,11 +1,13 @@
-// RUN: %clang_cc1 -triple armv7-apple-darwin9 -emit-llvm -o - %s | FileCheck %s
-// RUN: %clang_cc1 -triple armv7s-apple-ios9 -emit-llvm -o - %s | FileCheck %s
-// RUN: %clang_cc1 -triple armv7k-apple-ios9 -emit-llvm -o - %s | FileCheck %s
+// RUN: %clang_cc1 -no-opaque-pointers -no-enable-noundef-analysis -triple armv7-apple-darwin9 -emit-llvm -o - %s | FileCheck %s
+// RUN: %clang_cc1 -no-opaque-pointers -no-enable-noundef-analysis -triple armv7s-apple-ios9 -emit-llvm -o - %s | FileCheck %s
+// RUN: %clang_cc1 -no-opaque-pointers -no-enable-noundef-analysis -triple armv7k-apple-ios9 -emit-llvm -o - %s | FileCheck %s
 
 #define SWIFTCALL __attribute__((swiftcall))
+#define SWIFTASYNCCALL __attribute__((swiftasynccall))
 #define OUT __attribute__((swift_indirect_result))
 #define ERROR __attribute__((swift_error_result))
 #define CONTEXT __attribute__((swift_context))
+#define ASYNC_CONTEXT __attribute__((swift_async_context))
 
 /*****************************************************************************/
 /****************************** PARAMETER ABIS *******************************/
@@ -25,8 +27,14 @@ SWIFTCALL struct_reallybig indirect_result_3(OUT int *arg0, OUT float *arg1) { _
 SWIFTCALL void context_1(CONTEXT void *self) {}
 // CHECK-LABEL: define{{.*}} void @context_1(i8* swiftself
 
+SWIFTASYNCCALL void async_context_1(ASYNC_CONTEXT void *self) {}
+// CHECK-LABEL: define{{.*}} void @async_context_1(i8* swiftasync
+
 SWIFTCALL void context_2(void *arg0, CONTEXT void *self) {}
 // CHECK-LABEL: define{{.*}} void @context_2(i8*{{.*}}, i8* swiftself
+
+SWIFTASYNCCALL void async_context_2(void *arg0, ASYNC_CONTEXT void *self) {}
+// CHECK-LABEL: define{{.*}} void @async_context_2(i8*{{.*}}, i8* swiftasync
 
 SWIFTCALL void context_error_1(CONTEXT int *self, ERROR float **error) {}
 // CHECK-LABEL: define{{.*}} void @context_error_1(i32* swiftself{{.*}}, float** swifterror %0)
@@ -35,7 +43,7 @@ SWIFTCALL void context_error_1(CONTEXT int *self, ERROR float **error) {}
 // CHECK:       store float* [[T0]], float** [[TEMP]], align 4
 // CHECK:       [[T0:%.*]] = load float*, float** [[TEMP]], align 4
 // CHECK:       store float* [[T0]], float** [[ERRORARG]], align 4
-void test_context_error_1() {
+void test_context_error_1(void) {
   int x;
   float *error;
   context_error_1(&x, &error);
@@ -77,7 +85,7 @@ typedef long long long2 __attribute__((ext_vector_type(2)));
   }                                      \
   SWIFTCALL void take_##TYPE(TYPE v) {   \
   }                                      \
-  void test_##TYPE() {                   \
+  void test_##TYPE(void) {                   \
     take_##TYPE(return_##TYPE());        \
   }
 

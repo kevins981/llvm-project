@@ -17,7 +17,6 @@
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Module.h"
-#include "llvm/Support/Debug.h"
 #include "llvm/Transforms/Scalar/DCE.h"
 
 using namespace llvm;
@@ -33,14 +32,15 @@ static void createEmptyFunction(Module &M) {
 }
 
 void IRMutationStrategy::mutate(Module &M, RandomIRBuilder &IB) {
-  if (M.empty())
-    createEmptyFunction(M);
-
   auto RS = makeSampler<Function *>(IB.Rand);
   for (Function &F : M)
     if (!F.isDeclaration())
       RS.sample(&F, /*Weight=*/1);
-  mutate(*RS.getSelection(), IB);
+
+  if (RS.isEmpty())
+    createEmptyFunction(M);
+  else
+    mutate(*RS.getSelection(), IB);
 }
 
 void IRMutationStrategy::mutate(Function &F, RandomIRBuilder &IB) {
@@ -143,7 +143,10 @@ uint64_t InstDeleterIRStrategy::getWeight(size_t CurrentSize, size_t MaxSize,
     return CurrentWeight ? CurrentWeight * 100 : 1;
   // Draw a line starting from when we only have 1k left and increasing linearly
   // to double the current weight.
-  int Line = (-2 * CurrentWeight) * (MaxSize - CurrentSize + 1000);
+  int64_t Line = (-2 * static_cast<int64_t>(CurrentWeight)) *
+                 (static_cast<int64_t>(MaxSize) -
+                  static_cast<int64_t>(CurrentSize) - 1000) /
+                 1000;
   // Clamp negative weights to zero.
   if (Line < 0)
     return 0;

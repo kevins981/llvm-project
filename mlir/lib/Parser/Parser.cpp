@@ -11,13 +11,15 @@
 //===----------------------------------------------------------------------===//
 
 #include "Parser.h"
+#include "AsmParserImpl.h"
 #include "mlir/IR/AffineMap.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Dialect.h"
 #include "mlir/IR/Verifier.h"
-#include "mlir/Parser.h"
 #include "mlir/Parser/AsmParserState.h"
+#include "mlir/Parser/Parser.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/ScopeExit.h"
 #include "llvm/ADT/StringSet.h"
 #include "llvm/ADT/bit.h"
 #include "llvm/Support/PrettyStackTrace.h"
@@ -27,27 +29,96 @@
 using namespace mlir;
 using namespace mlir::detail;
 using llvm::MemoryBuffer;
-using llvm::SMLoc;
 using llvm::SourceMgr;
 
 //===----------------------------------------------------------------------===//
 // Parser
 //===----------------------------------------------------------------------===//
 
-/// Parse a comma separated list of elements that must have at least one entry
-/// in it.
+/// Parse a list of comma-separated items with an optional delimiter.  If a
+/// delimiter is provided, then an empty list is allowed.  If not, then at
+/// least one element will be parsed.
 ParseResult
-Parser::parseCommaSeparatedList(function_ref<ParseResult()> parseElement) {
+Parser::parseCommaSeparatedList(Delimiter delimiter,
+                                function_ref<ParseResult()> parseElementFn,
+                                StringRef contextMessage) {
+  switch (delimiter) {
+  case Delimiter::None:
+    break;
+  case Delimiter::OptionalParen:
+    if (getToken().isNot(Token::l_paren))
+      return success();
+    LLVM_FALLTHROUGH;
+  case Delimiter::Paren:
+    if (parseToken(Token::l_paren, "expected '('" + contextMessage))
+      return failure();
+    // Check for empty list.
+    if (consumeIf(Token::r_paren))
+      return success();
+    break;
+  case Delimiter::OptionalLessGreater:
+    // Check for absent list.
+    if (getToken().isNot(Token::less))
+      return success();
+    LLVM_FALLTHROUGH;
+  case Delimiter::LessGreater:
+    if (parseToken(Token::less, "expected '<'" + contextMessage))
+      return success();
+    // Check for empty list.
+    if (consumeIf(Token::greater))
+      return success();
+    break;
+  case Delimiter::OptionalSquare:
+    if (getToken().isNot(Token::l_square))
+      return success();
+    LLVM_FALLTHROUGH;
+  case Delimiter::Square:
+    if (parseToken(Token::l_square, "expected '['" + contextMessage))
+      return failure();
+    // Check for empty list.
+    if (consumeIf(Token::r_square))
+      return success();
+    break;
+  case Delimiter::OptionalBraces:
+    if (getToken().isNot(Token::l_brace))
+      return success();
+    LLVM_FALLTHROUGH;
+  case Delimiter::Braces:
+    if (parseToken(Token::l_brace, "expected '{'" + contextMessage))
+      return failure();
+    // Check for empty list.
+    if (consumeIf(Token::r_brace))
+      return success();
+    break;
+  }
+
   // Non-empty case starts with an element.
-  if (parseElement())
+  if (parseElementFn())
     return failure();
 
   // Otherwise we have a list of comma separated elements.
   while (consumeIf(Token::comma)) {
-    if (parseElement())
+    if (parseElementFn())
       return failure();
   }
-  return success();
+
+  switch (delimiter) {
+  case Delimiter::None:
+    return success();
+  case Delimiter::OptionalParen:
+  case Delimiter::Paren:
+    return parseToken(Token::r_paren, "expected ')'" + contextMessage);
+  case Delimiter::OptionalLessGreater:
+  case Delimiter::LessGreater:
+    return parseToken(Token::greater, "expected '>'" + contextMessage);
+  case Delimiter::OptionalSquare:
+  case Delimiter::Square:
+    return parseToken(Token::r_square, "expected ']'" + contextMessage);
+  case Delimiter::OptionalBraces:
+  case Delimiter::Braces:
+    return parseToken(Token::r_brace, "expected '}'" + contextMessage);
+  }
+  llvm_unreachable("Unknown delimiter");
 }
 
 /// Parse a comma-separated list of elements, terminated with an arbitrary
@@ -126,7 +197,7 @@ OptionalParseResult Parser::parseOptionalInteger(APInt &result) {
 ParseResult Parser::parseFloatFromIntegerLiteral(
     Optional<APFloat> &result, const Token &tok, bool isNegative,
     const llvm::fltSemantics &semantics, size_t typeSizeInBits) {
-  llvm::SMLoc loc = tok.getLoc();
+  SMLoc loc = tok.getLoc();
   StringRef spelling = tok.getSpelling();
   bool isHex = spelling.size() > 1 && spelling[1] == 'x';
   if (!isHex) {
@@ -166,13 +237,7 @@ namespace {
 /// operations.
 class OperationParser : public Parser {
 public:
-  OperationParser(ParserState &state, Operation *topLevelOp)
-      : Parser(state), opBuilder(topLevelOp->getRegion(0)),
-        topLevelOp(topLevelOp) {
-    // The top level operation starts a new name scope.
-    pushSSANameScope(/*isIsolated=*/true);
-  }
-
+  OperationParser(ParserState &state, ModuleOp topLevelOp);
   ~OperationParser();
 
   /// After parsing is finished, this function must be called to see if there
@@ -183,14 +248,11 @@ public:
   // SSA Value Handling
   //===--------------------------------------------------------------------===//
 
-  /// This represents a use of an SSA value in the program.  The first two
-  /// entries in the tuple are the name and result number of a reference.  The
-  /// third is the location of the reference, which is used in case this ends
-  /// up being a use of an undefined value.
-  struct SSAUseInfo {
-    StringRef name;  // Value name, e.g. %42 or %abc
-    unsigned number; // Number, specified with #12
-    SMLoc loc;       // Location of first definition or use.
+  using UnresolvedOperand = OpAsmParser::UnresolvedOperand;
+
+  struct DeferredLocInfo {
+    SMLoc loc;
+    StringRef identifier;
   };
 
   /// Push a new SSA name scope to the parser.
@@ -200,20 +262,21 @@ public:
   ParseResult popSSANameScope();
 
   /// Register a definition of a value with the symbol table.
-  ParseResult addDefinition(SSAUseInfo useInfo, Value value);
+  ParseResult addDefinition(UnresolvedOperand useInfo, Value value);
 
   /// Parse an optional list of SSA uses into 'results'.
-  ParseResult parseOptionalSSAUseList(SmallVectorImpl<SSAUseInfo> &results);
+  ParseResult
+  parseOptionalSSAUseList(SmallVectorImpl<UnresolvedOperand> &results);
 
   /// Parse a single SSA use into 'result'.
-  ParseResult parseSSAUse(SSAUseInfo &result);
+  ParseResult parseSSAUse(UnresolvedOperand &result);
 
   /// Given a reference to an SSA value and its type, return a reference. This
   /// returns null on failure.
-  Value resolveSSAUse(SSAUseInfo useInfo, Type type);
+  Value resolveSSAUse(UnresolvedOperand useInfo, Type type);
 
-  ParseResult
-  parseSSADefOrUseAndType(function_ref<ParseResult(SSAUseInfo, Type)> action);
+  ParseResult parseSSADefOrUseAndType(
+      function_ref<ParseResult(UnresolvedOperand, Type)> action);
 
   ParseResult parseOptionalSSAUseAndTypeList(SmallVectorImpl<Value> &results);
 
@@ -244,16 +307,41 @@ public:
   /// Parse an operation instance that is in the generic form.
   Operation *parseGenericOperation();
 
+  /// Parse different components, viz., use-info of operand(s), successor(s),
+  /// region(s), attribute(s) and function-type, of the generic form of an
+  /// operation instance and populate the input operation-state 'result' with
+  /// those components. If any of the components is explicitly provided, then
+  /// skip parsing that component.
+  ParseResult parseGenericOperationAfterOpName(
+      OperationState &result,
+      Optional<ArrayRef<UnresolvedOperand>> parsedOperandUseInfo = llvm::None,
+      Optional<ArrayRef<Block *>> parsedSuccessors = llvm::None,
+      Optional<MutableArrayRef<std::unique_ptr<Region>>> parsedRegions =
+          llvm::None,
+      Optional<ArrayRef<NamedAttribute>> parsedAttributes = llvm::None,
+      Optional<FunctionType> parsedFnType = llvm::None);
+
   /// Parse an operation instance that is in the generic form and insert it at
   /// the provided insertion point.
   Operation *parseGenericOperation(Block *insertBlock,
                                    Block::iterator insertPt);
 
-  /// Parse an optional trailing location for the given operation.
+  /// This type is used to keep track of things that are either an Operation or
+  /// a BlockArgument.  We cannot use Value for this, because not all Operations
+  /// have results.
+  using OpOrArgument = llvm::PointerUnion<Operation *, BlockArgument>;
+
+  /// Parse an optional trailing location and add it to the specifier Operation
+  /// or `UnresolvedOperand` if present.
   ///
   ///   trailing-location ::= (`loc` (`(` location `)` | attribute-alias))?
   ///
-  ParseResult parseTrailingOperationLocation(Operation *op);
+  ParseResult parseTrailingLocationSpecifier(OpOrArgument opOrArgument);
+
+  /// Parse a location alias, that is a sequence looking like: #loc42
+  /// The alias may have already be defined or may be defined later, in which
+  /// case an OpaqueLoc is used a placeholder.
+  ParseResult parseLocationAlias(LocationAttr &loc);
 
   /// This is the structure of a result specifier in the assembly syntax,
   /// including the name, number of results, and location.
@@ -263,19 +351,29 @@ public:
   /// resultInfo specifies information about the "%name =" specifiers.
   Operation *parseCustomOperation(ArrayRef<ResultRecord> resultIDs);
 
+  /// Parse the name of an operation, in the custom form. On success, return a
+  /// an object of type 'OperationName'. Otherwise, failure is returned.
+  FailureOr<OperationName> parseCustomOperationName();
+
   //===--------------------------------------------------------------------===//
   // Region Parsing
   //===--------------------------------------------------------------------===//
 
   /// Parse a region into 'region' with the provided entry block arguments.
-  /// 'isIsolatedNameScope' indicates if the naming scope of this region is
-  /// isolated from those above.
-  ParseResult parseRegion(Region &region,
-                          ArrayRef<std::pair<SSAUseInfo, Type>> entryArguments,
-                          bool isIsolatedNameScope = false);
+  /// If non-empty, 'argLocations' contains an optional locations for each
+  /// argument. 'isIsolatedNameScope' indicates if the naming scope of this
+  /// region is isolated from those above.
+  ParseResult
+  parseRegion(Region &region,
+              ArrayRef<std::pair<UnresolvedOperand, Type>> entryArguments,
+              ArrayRef<Location> argLocations,
+              bool isIsolatedNameScope = false);
 
   /// Parse a region body into 'region'.
-  ParseResult parseRegionBody(Region &region);
+  ParseResult
+  parseRegionBody(Region &region, SMLoc startLoc,
+                  ArrayRef<std::pair<UnresolvedOperand, Type>> entryArguments,
+                  ArrayRef<Location> argLocations, bool isIsolatedNameScope);
 
   //===--------------------------------------------------------------------===//
   // Block Parsing
@@ -294,10 +392,6 @@ public:
   /// already exist.  The location specified is the point of use, which allows
   /// us to diagnose references to blocks that are not defined precisely.
   Block *getBlockNamed(StringRef name, SMLoc loc);
-
-  /// Define the block with the specified name. Returns the Block* or nullptr in
-  /// the case of redefinition.
-  Block *defineBlockNamed(StringRef name, SMLoc loc, Block *existing);
 
 private:
   /// This class represents a definition of a Block.
@@ -383,9 +477,10 @@ private:
   /// their first reference, to allow checking for use of undefined values.
   DenseMap<Value, SMLoc> forwardRefPlaceholders;
 
-  /// A set of operations whose locations reference aliases that have yet to
-  /// be resolved.
-  SmallVector<std::pair<Operation *, Token>, 8> opsWithDeferredLocs;
+  /// Deffered locations: when parsing `loc(#loc42)` we add an entry to this
+  /// map. After parsing the definition `#loc42 = ...` we'll patch back users
+  /// of this location.
+  std::vector<DeferredLocInfo> deferredLocsReferences;
 
   /// The builder used when creating parsed operation instances.
   OpBuilder opBuilder;
@@ -393,7 +488,20 @@ private:
   /// The top level operation that holds all of the parsed operations.
   Operation *topLevelOp;
 };
-} // end anonymous namespace
+} // namespace
+
+MLIR_DECLARE_EXPLICIT_TYPE_ID(OperationParser::DeferredLocInfo *)
+MLIR_DEFINE_EXPLICIT_TYPE_ID(OperationParser::DeferredLocInfo *)
+
+OperationParser::OperationParser(ParserState &state, ModuleOp topLevelOp)
+    : Parser(state), opBuilder(topLevelOp.getRegion()), topLevelOp(topLevelOp) {
+  // The top level operation starts a new name scope.
+  pushSSANameScope(/*isIsolated=*/true);
+
+  // If we are populating the parser state, prepare it for parsing.
+  if (state.asmState)
+    state.asmState->initialize(topLevelOp);
+}
 
 OperationParser::~OperationParser() {
   for (auto &fwd : forwardRefPlaceholders) {
@@ -424,7 +532,7 @@ ParseResult OperationParser::finalize() {
       errors.push_back(entry.second.getPointer());
     llvm::array_pod_sort(errors.begin(), errors.end());
 
-    for (auto entry : errors) {
+    for (const char *entry : errors) {
       auto loc = SMLoc::getFromPointer(entry);
       emitError(loc, "use of undeclared SSA value name");
     }
@@ -433,22 +541,49 @@ ParseResult OperationParser::finalize() {
 
   // Resolve the locations of any deferred operations.
   auto &attributeAliases = state.symbols.attributeAliasDefinitions;
-  for (std::pair<Operation *, Token> &it : opsWithDeferredLocs) {
-    llvm::SMLoc tokLoc = it.second.getLoc();
-    StringRef identifier = it.second.getSpelling().drop_front();
-    Attribute attr = attributeAliases.lookup(identifier);
+  auto locID = TypeID::get<DeferredLocInfo *>();
+  auto resolveLocation = [&, this](auto &opOrArgument) -> LogicalResult {
+    auto fwdLoc = opOrArgument.getLoc().template dyn_cast<OpaqueLoc>();
+    if (!fwdLoc || fwdLoc.getUnderlyingTypeID() != locID)
+      return success();
+    auto locInfo = deferredLocsReferences[fwdLoc.getUnderlyingLocation()];
+    Attribute attr = attributeAliases.lookup(locInfo.identifier);
     if (!attr)
-      return emitError(tokLoc) << "operation location alias was never defined";
-
-    LocationAttr locAttr = attr.dyn_cast<LocationAttr>();
+      return this->emitError(locInfo.loc)
+             << "operation location alias was never defined";
+    auto locAttr = attr.dyn_cast<LocationAttr>();
     if (!locAttr)
-      return emitError(tokLoc)
+      return this->emitError(locInfo.loc)
              << "expected location, but found '" << attr << "'";
-    it.first->setLoc(locAttr);
-  }
+    opOrArgument.setLoc(locAttr);
+    return success();
+  };
+
+  auto walkRes = topLevelOp->walk([&](Operation *op) {
+    if (failed(resolveLocation(*op)))
+      return WalkResult::interrupt();
+    for (Region &region : op->getRegions())
+      for (Block &block : region.getBlocks())
+        for (BlockArgument arg : block.getArguments())
+          if (failed(resolveLocation(arg)))
+            return WalkResult::interrupt();
+    return WalkResult::advance();
+  });
+  if (walkRes.wasInterrupted())
+    return failure();
 
   // Pop the top level name scope.
-  return popSSANameScope();
+  if (failed(popSSANameScope()))
+    return failure();
+
+  // Verify that the parsed operations are valid.
+  if (failed(verify(topLevelOp)))
+    return failure();
+
+  // If we are populating the parser state, finalize the top-level operation.
+  if (state.asmState)
+    state.asmState->finalize(topLevelOp);
+  return success();
 }
 
 //===----------------------------------------------------------------------===//
@@ -499,7 +634,8 @@ ParseResult OperationParser::popSSANameScope() {
 }
 
 /// Register a definition of a value with the symbol table.
-ParseResult OperationParser::addDefinition(SSAUseInfo useInfo, Value value) {
+ParseResult OperationParser::addDefinition(UnresolvedOperand useInfo,
+                                           Value value) {
   auto &entries = getSSAValueEntry(useInfo.name);
 
   // Make sure there is a slot for this value.
@@ -510,14 +646,14 @@ ParseResult OperationParser::addDefinition(SSAUseInfo useInfo, Value value) {
   // or a forward reference.
   if (auto existing = entries[useInfo.number].value) {
     if (!isForwardRefPlaceholder(existing)) {
-      return emitError(useInfo.loc)
+      return emitError(useInfo.location)
           .append("redefinition of SSA value '", useInfo.name, "'")
           .attachNote(getEncodedSourceLocation(entries[useInfo.number].loc))
           .append("previously defined here");
     }
 
     if (existing.getType() != value.getType()) {
-      return emitError(useInfo.loc)
+      return emitError(useInfo.location)
           .append("definition of SSA value '", useInfo.name, "#",
                   useInfo.number, "' has type ", value.getType())
           .attachNote(getEncodedSourceLocation(entries[useInfo.number].loc))
@@ -538,7 +674,7 @@ ParseResult OperationParser::addDefinition(SSAUseInfo useInfo, Value value) {
   }
 
   /// Record this definition for the current scope.
-  entries[useInfo.number] = {value, useInfo.loc};
+  entries[useInfo.number] = {value, useInfo.location};
   recordDefinition(useInfo.name);
   return success();
 }
@@ -548,12 +684,12 @@ ParseResult OperationParser::addDefinition(SSAUseInfo useInfo, Value value) {
 ///   ssa-use-list ::= ssa-use (`,` ssa-use)*
 ///   ssa-use-list-opt ::= ssa-use-list?
 ///
-ParseResult
-OperationParser::parseOptionalSSAUseList(SmallVectorImpl<SSAUseInfo> &results) {
+ParseResult OperationParser::parseOptionalSSAUseList(
+    SmallVectorImpl<UnresolvedOperand> &results) {
   if (getToken().isNot(Token::percent_identifier))
     return success();
   return parseCommaSeparatedList([&]() -> ParseResult {
-    SSAUseInfo result;
+    UnresolvedOperand result;
     if (parseSSAUse(result))
       return failure();
     results.push_back(result);
@@ -565,10 +701,10 @@ OperationParser::parseOptionalSSAUseList(SmallVectorImpl<SSAUseInfo> &results) {
 ///
 ///   ssa-use ::= ssa-id
 ///
-ParseResult OperationParser::parseSSAUse(SSAUseInfo &result) {
+ParseResult OperationParser::parseSSAUse(UnresolvedOperand &result) {
   result.name = getTokenSpelling();
   result.number = 0;
-  result.loc = getToken().getLoc();
+  result.location = getToken().getLoc();
   if (parseToken(Token::percent_identifier, "expected SSA operand"))
     return failure();
 
@@ -586,14 +722,14 @@ ParseResult OperationParser::parseSSAUse(SSAUseInfo &result) {
 
 /// Given an unbound reference to an SSA value and its type, return the value
 /// it specifies.  This returns null on failure.
-Value OperationParser::resolveSSAUse(SSAUseInfo useInfo, Type type) {
+Value OperationParser::resolveSSAUse(UnresolvedOperand useInfo, Type type) {
   auto &entries = getSSAValueEntry(useInfo.name);
 
   // Functor used to record the use of the given value if the assembly state
   // field is populated.
   auto maybeRecordUse = [&](Value value) {
     if (state.asmState)
-      state.asmState->addUses(value, useInfo.loc);
+      state.asmState->addUses(value, useInfo.location);
     return value;
   };
 
@@ -604,7 +740,7 @@ Value OperationParser::resolveSSAUse(SSAUseInfo useInfo, Type type) {
     if (result.getType() == type)
       return maybeRecordUse(result);
 
-    emitError(useInfo.loc, "use of value '")
+    emitError(useInfo.location, "use of value '")
         .append(useInfo.name,
                 "' expects different type than prior uses: ", type, " vs ",
                 result.getType())
@@ -620,13 +756,13 @@ Value OperationParser::resolveSSAUse(SSAUseInfo useInfo, Type type) {
   // If the value has already been defined and this is an overly large result
   // number, diagnose that.
   if (entries[0].value && !isForwardRefPlaceholder(entries[0].value))
-    return (emitError(useInfo.loc, "reference to invalid result number"),
+    return (emitError(useInfo.location, "reference to invalid result number"),
             nullptr);
 
   // Otherwise, this is a forward reference.  Create a placeholder and remember
   // that we did so.
-  auto result = createForwardRefPlaceholder(useInfo.loc, type);
-  entries[useInfo.number] = {result, useInfo.loc};
+  Value result = createForwardRefPlaceholder(useInfo.location, type);
+  entries[useInfo.number] = {result, useInfo.location};
   return maybeRecordUse(result);
 }
 
@@ -634,8 +770,8 @@ Value OperationParser::resolveSSAUse(SSAUseInfo useInfo, Type type) {
 ///
 ///   ssa-use-and-type ::= ssa-use `:` type
 ParseResult OperationParser::parseSSADefOrUseAndType(
-    function_ref<ParseResult(SSAUseInfo, Type)> action) {
-  SSAUseInfo useInfo;
+    function_ref<ParseResult(UnresolvedOperand, Type)> action) {
+  UnresolvedOperand useInfo;
   if (parseSSAUse(useInfo) ||
       parseToken(Token::colon, "expected ':' and type for SSA operand"))
     return failure();
@@ -655,7 +791,7 @@ ParseResult OperationParser::parseSSADefOrUseAndType(
 ///
 ParseResult OperationParser::parseOptionalSSAUseAndTypeList(
     SmallVectorImpl<Value> &results) {
-  SmallVector<SSAUseInfo, 4> valueIDs;
+  SmallVector<UnresolvedOperand, 4> valueIDs;
   if (parseOptionalSSAUseList(valueIDs))
     return failure();
 
@@ -702,7 +838,7 @@ Value OperationParser::createForwardRefPlaceholder(SMLoc loc, Type type) {
   // We create these placeholders as having an empty name, which we know
   // cannot be created through normal user input, allowing us to distinguish
   // them.
-  auto name = OperationName("placeholder", getContext());
+  auto name = OperationName("builtin.unrealized_conversion_cast", getContext());
   auto *op = Operation::create(
       getEncodedSourceLocation(loc), name, type, /*operands=*/{},
       /*attributes=*/llvm::None, /*successors=*/{}, /*numRegions=*/0);
@@ -792,20 +928,22 @@ ParseResult OperationParser::parseOperation() {
     // Add this operation to the assembly state if it was provided to populate.
     if (state.asmState) {
       unsigned resultIt = 0;
-      SmallVector<std::pair<unsigned, llvm::SMLoc>> asmResultGroups;
+      SmallVector<std::pair<unsigned, SMLoc>> asmResultGroups;
       asmResultGroups.reserve(resultIDs.size());
       for (ResultRecord &record : resultIDs) {
         asmResultGroups.emplace_back(resultIt, std::get<2>(record));
         resultIt += std::get<1>(record);
       }
-      state.asmState->addDefinition(op, nameTok.getLocRange(), asmResultGroups);
+      state.asmState->finalizeOperationDefinition(
+          op, nameTok.getLocRange(), /*endLoc=*/getToken().getLoc(),
+          asmResultGroups);
     }
 
     // Add definitions for each of the result groups.
     unsigned opResI = 0;
     for (ResultRecord &resIt : resultIDs) {
       for (unsigned subRes : llvm::seq<unsigned>(0, std::get<1>(resIt))) {
-        if (addDefinition({std::get<0>(resIt), subRes, std::get<2>(resIt)},
+        if (addDefinition({std::get<2>(resIt), std::get<0>(resIt), subRes},
                           op->getResult(opResI++)))
           return failure();
       }
@@ -813,7 +951,8 @@ ParseResult OperationParser::parseOperation() {
 
     // Add this operation to the assembly state if it was provided to populate.
   } else if (state.asmState) {
-    state.asmState->addDefinition(op, nameTok.getLocRange());
+    state.asmState->finalizeOperationDefinition(op, nameTok.getLocRange(),
+                                                /*endLoc=*/getToken().getLoc());
   }
 
   return success();
@@ -869,6 +1008,107 @@ struct CleanupOpStateRegions {
 };
 } // namespace
 
+ParseResult OperationParser::parseGenericOperationAfterOpName(
+    OperationState &result,
+    Optional<ArrayRef<UnresolvedOperand>> parsedOperandUseInfo,
+    Optional<ArrayRef<Block *>> parsedSuccessors,
+    Optional<MutableArrayRef<std::unique_ptr<Region>>> parsedRegions,
+    Optional<ArrayRef<NamedAttribute>> parsedAttributes,
+    Optional<FunctionType> parsedFnType) {
+
+  // Parse the operand list, if not explicitly provided.
+  SmallVector<UnresolvedOperand, 8> opInfo;
+  if (!parsedOperandUseInfo) {
+    if (parseToken(Token::l_paren, "expected '(' to start operand list") ||
+        parseOptionalSSAUseList(opInfo) ||
+        parseToken(Token::r_paren, "expected ')' to end operand list")) {
+      return failure();
+    }
+    parsedOperandUseInfo = opInfo;
+  }
+
+  // Parse the successor list, if not explicitly provided.
+  if (!parsedSuccessors) {
+    if (getToken().is(Token::l_square)) {
+      // Check if the operation is not a known terminator.
+      if (!result.name.mightHaveTrait<OpTrait::IsTerminator>())
+        return emitError("successors in non-terminator");
+
+      SmallVector<Block *, 2> successors;
+      if (parseSuccessors(successors))
+        return failure();
+      result.addSuccessors(successors);
+    }
+  } else {
+    result.addSuccessors(*parsedSuccessors);
+  }
+
+  // Parse the region list, if not explicitly provided.
+  if (!parsedRegions) {
+    if (consumeIf(Token::l_paren)) {
+      do {
+        // Create temporary regions with the top level region as parent.
+        result.regions.emplace_back(new Region(topLevelOp));
+        if (parseRegion(*result.regions.back(), /*entryArguments=*/{},
+                        /*argLocations=*/{}))
+          return failure();
+      } while (consumeIf(Token::comma));
+      if (parseToken(Token::r_paren, "expected ')' to end region list"))
+        return failure();
+    }
+  } else {
+    result.addRegions(*parsedRegions);
+  }
+
+  // Parse the attributes, if not explicitly provided.
+  if (!parsedAttributes) {
+    if (getToken().is(Token::l_brace)) {
+      if (parseAttributeDict(result.attributes))
+        return failure();
+    }
+  } else {
+    result.addAttributes(*parsedAttributes);
+  }
+
+  // Parse the operation type, if not explicitly provided.
+  Location typeLoc = result.location;
+  if (!parsedFnType) {
+    if (parseToken(Token::colon, "expected ':' followed by operation type"))
+      return failure();
+
+    typeLoc = getEncodedSourceLocation(getToken().getLoc());
+    auto type = parseType();
+    if (!type)
+      return failure();
+    auto fnType = type.dyn_cast<FunctionType>();
+    if (!fnType)
+      return mlir::emitError(typeLoc, "expected function type");
+
+    parsedFnType = fnType;
+  }
+
+  result.addTypes(parsedFnType->getResults());
+
+  // Check that we have the right number of types for the operands.
+  ArrayRef<Type> operandTypes = parsedFnType->getInputs();
+  if (operandTypes.size() != parsedOperandUseInfo->size()) {
+    auto plural = "s"[parsedOperandUseInfo->size() == 1];
+    return mlir::emitError(typeLoc, "expected ")
+           << parsedOperandUseInfo->size() << " operand type" << plural
+           << " but had " << operandTypes.size();
+  }
+
+  // Resolve all of the operands.
+  for (unsigned i = 0, e = parsedOperandUseInfo->size(); i != e; ++i) {
+    result.operands.push_back(
+        resolveSSAUse((*parsedOperandUseInfo)[i], operandTypes[i]));
+    if (!result.operands.back())
+      return failure();
+  }
+
+  return success();
+}
+
 Operation *OperationParser::parseGenericOperation() {
   // Get location information for the operation.
   auto srcLocation = getEncodedSourceLocation(getToken().getLoc());
@@ -882,109 +1122,65 @@ Operation *OperationParser::parseGenericOperation() {
   consumeToken(Token::string);
 
   OperationState result(srcLocation, name);
+  CleanupOpStateRegions guard{result};
 
   // Lazy load dialects in the context as needed.
-  if (!result.name.getAbstractOperation()) {
+  if (!result.name.isRegistered()) {
     StringRef dialectName = StringRef(name).split('.').first;
     if (!getContext()->getLoadedDialect(dialectName) &&
-        getContext()->getOrLoadDialect(dialectName)) {
-      result.name = OperationName(name, getContext());
+        !getContext()->getOrLoadDialect(dialectName) &&
+        !getContext()->allowsUnregisteredDialects()) {
+      // Emit an error if the dialect couldn't be loaded (i.e., it was not
+      // registered) and unregistered dialects aren't allowed.
+      emitError("operation being parsed with an unregistered dialect. If "
+                "this is intended, please use -allow-unregistered-dialect "
+                "with the MLIR tool used");
+      return nullptr;
     }
   }
 
-  // Parse the operand list.
-  SmallVector<SSAUseInfo, 8> operandInfos;
-  if (parseToken(Token::l_paren, "expected '(' to start operand list") ||
-      parseOptionalSSAUseList(operandInfos) ||
-      parseToken(Token::r_paren, "expected ')' to end operand list")) {
+  // If we are populating the parser state, start a new operation definition.
+  if (state.asmState)
+    state.asmState->startOperationDefinition(result.name);
+
+  if (parseGenericOperationAfterOpName(result))
     return nullptr;
-  }
-
-  // Parse the successor list.
-  if (getToken().is(Token::l_square)) {
-    // Check if the operation is a known terminator.
-    const AbstractOperation *abstractOp = result.name.getAbstractOperation();
-    if (abstractOp && !abstractOp->hasTrait<OpTrait::IsTerminator>())
-      return emitError("successors in non-terminator"), nullptr;
-
-    SmallVector<Block *, 2> successors;
-    if (parseSuccessors(successors))
-      return nullptr;
-    result.addSuccessors(successors);
-  }
-
-  // Parse the region list.
-  CleanupOpStateRegions guard{result};
-  if (consumeIf(Token::l_paren)) {
-    do {
-      // Create temporary regions with the top level region as parent.
-      result.regions.emplace_back(new Region(topLevelOp));
-      if (parseRegion(*result.regions.back(), /*entryArguments=*/{}))
-        return nullptr;
-    } while (consumeIf(Token::comma));
-    if (parseToken(Token::r_paren, "expected ')' to end region list"))
-      return nullptr;
-  }
-
-  if (getToken().is(Token::l_brace)) {
-    if (parseAttributeDict(result.attributes))
-      return nullptr;
-  }
-
-  if (parseToken(Token::colon, "expected ':' followed by operation type"))
-    return nullptr;
-
-  auto typeLoc = getToken().getLoc();
-  auto type = parseType();
-  if (!type)
-    return nullptr;
-  auto fnType = type.dyn_cast<FunctionType>();
-  if (!fnType)
-    return (emitError(typeLoc, "expected function type"), nullptr);
-
-  result.addTypes(fnType.getResults());
-
-  // Check that we have the right number of types for the operands.
-  auto operandTypes = fnType.getInputs();
-  if (operandTypes.size() != operandInfos.size()) {
-    auto plural = "s"[operandInfos.size() == 1];
-    return (emitError(typeLoc, "expected ")
-                << operandInfos.size() << " operand type" << plural
-                << " but had " << operandTypes.size(),
-            nullptr);
-  }
-
-  // Resolve all of the operands.
-  for (unsigned i = 0, e = operandInfos.size(); i != e; ++i) {
-    result.operands.push_back(resolveSSAUse(operandInfos[i], operandTypes[i]));
-    if (!result.operands.back())
-      return nullptr;
-  }
 
   // Create the operation and try to parse a location for it.
-  Operation *op = opBuilder.createOperation(result);
-  if (parseTrailingOperationLocation(op))
+  Operation *op = opBuilder.create(result);
+  if (parseTrailingLocationSpecifier(op))
     return nullptr;
   return op;
 }
 
 Operation *OperationParser::parseGenericOperation(Block *insertBlock,
                                                   Block::iterator insertPt) {
+  Token nameToken = getToken();
+
   OpBuilder::InsertionGuard restoreInsertionPoint(opBuilder);
   opBuilder.setInsertionPoint(insertBlock, insertPt);
-  return parseGenericOperation();
+  Operation *op = parseGenericOperation();
+  if (!op)
+    return nullptr;
+
+  // If we are populating the parser asm state, finalize this operation
+  // definition.
+  if (state.asmState)
+    state.asmState->finalizeOperationDefinition(op, nameToken.getLocRange(),
+                                                /*endLoc=*/getToken().getLoc());
+  return op;
 }
 
 namespace {
-class CustomOpAsmParser : public OpAsmParser {
+class CustomOpAsmParser : public AsmParserImpl<OpAsmParser> {
 public:
   CustomOpAsmParser(
       SMLoc nameLoc, ArrayRef<OperationParser::ResultRecord> resultIDs,
       function_ref<ParseResult(OpAsmParser &, OperationState &)> parseAssembly,
       bool isIsolatedFromAbove, StringRef opName, OperationParser &parser)
-      : nameLoc(nameLoc), resultIDs(resultIDs), parseAssembly(parseAssembly),
-        isIsolatedFromAbove(isIsolatedFromAbove), opName(opName),
-        parser(parser) {
+      : AsmParserImpl<OpAsmParser>(nameLoc, parser), resultIDs(resultIDs),
+        parseAssembly(parseAssembly), isIsolatedFromAbove(isIsolatedFromAbove),
+        opName(opName), parser(parser) {
     (void)isIsolatedFromAbove; // Only used in assert, silence unused warning.
   }
 
@@ -1000,7 +1196,7 @@ public:
     Optional<NamedAttribute> duplicate = opState.attributes.findDuplicate();
     if (duplicate)
       return emitError(getNameLoc(), "attribute '")
-             << duplicate->first
+             << duplicate->getName().getValue()
              << "' occurs more than once in the attribute list";
     return success();
   }
@@ -1010,24 +1206,24 @@ public:
     return parser.parseGenericOperation(insertBlock, insertPt);
   }
 
+  FailureOr<OperationName> parseCustomOperationName() final {
+    return parser.parseCustomOperationName();
+  }
+
+  ParseResult parseGenericOperationAfterOpName(
+      OperationState &result,
+      Optional<ArrayRef<UnresolvedOperand>> parsedUnresolvedOperands,
+      Optional<ArrayRef<Block *>> parsedSuccessors,
+      Optional<MutableArrayRef<std::unique_ptr<Region>>> parsedRegions,
+      Optional<ArrayRef<NamedAttribute>> parsedAttributes,
+      Optional<FunctionType> parsedFnType) final {
+    return parser.parseGenericOperationAfterOpName(
+        result, parsedUnresolvedOperands, parsedSuccessors, parsedRegions,
+        parsedAttributes, parsedFnType);
+  }
   //===--------------------------------------------------------------------===//
   // Utilities
   //===--------------------------------------------------------------------===//
-
-  /// Return if any errors were emitted during parsing.
-  bool didEmitError() const { return emittedError; }
-
-  /// Emit a diagnostic at the specified location and return failure.
-  InFlightDiagnostic emitError(llvm::SMLoc loc, const Twine &message) override {
-    emittedError = true;
-    return parser.emitError(loc, "custom op '" + opName + "' " + message);
-  }
-
-  llvm::SMLoc getCurrentLocation() override {
-    return parser.getToken().getLoc();
-  }
-
-  Builder &getBuilder() const override { return parser.builder; }
 
   /// Return the name of the specified result in the specified syntax, as well
   /// as the subelement in the name.  For example, in this operation:
@@ -1041,8 +1237,7 @@ public:
   std::pair<StringRef, unsigned>
   getResultName(unsigned resultNo) const override {
     // Scan for the resultID that contains this result number.
-    for (unsigned nameID = 0, e = resultIDs.size(); nameID != e; ++nameID) {
-      const auto &entry = resultIDs[nameID];
+    for (const auto &entry : resultIDs) {
       if (resultNo < std::get<1>(entry)) {
         // Don't pass on the leading %.
         StringRef name = std::get<0>(entry).drop_front();
@@ -1064,299 +1259,10 @@ public:
     return count;
   }
 
-  llvm::SMLoc getNameLoc() const override { return nameLoc; }
-
-  /// Re-encode the given source location as an MLIR location and return it.
-  Location getEncodedSourceLoc(llvm::SMLoc loc) override {
-    return parser.getEncodedSourceLocation(loc);
-  }
-
-  //===--------------------------------------------------------------------===//
-  // Token Parsing
-  //===--------------------------------------------------------------------===//
-
-  /// Parse a `->` token.
-  ParseResult parseArrow() override {
-    return parser.parseToken(Token::arrow, "expected '->'");
-  }
-
-  /// Parses a `->` if present.
-  ParseResult parseOptionalArrow() override {
-    return success(parser.consumeIf(Token::arrow));
-  }
-
-  /// Parse a '{' token.
-  ParseResult parseLBrace() override {
-    return parser.parseToken(Token::l_brace, "expected '{'");
-  }
-
-  /// Parse a '{' token if present
-  ParseResult parseOptionalLBrace() override {
-    return success(parser.consumeIf(Token::l_brace));
-  }
-
-  /// Parse a `}` token.
-  ParseResult parseRBrace() override {
-    return parser.parseToken(Token::r_brace, "expected '}'");
-  }
-
-  /// Parse a `}` token if present
-  ParseResult parseOptionalRBrace() override {
-    return success(parser.consumeIf(Token::r_brace));
-  }
-
-  /// Parse a `:` token.
-  ParseResult parseColon() override {
-    return parser.parseToken(Token::colon, "expected ':'");
-  }
-
-  /// Parse a `:` token if present.
-  ParseResult parseOptionalColon() override {
-    return success(parser.consumeIf(Token::colon));
-  }
-
-  /// Parse a `,` token.
-  ParseResult parseComma() override {
-    return parser.parseToken(Token::comma, "expected ','");
-  }
-
-  /// Parse a `,` token if present.
-  ParseResult parseOptionalComma() override {
-    return success(parser.consumeIf(Token::comma));
-  }
-
-  /// Parses a `...` if present.
-  ParseResult parseOptionalEllipsis() override {
-    return success(parser.consumeIf(Token::ellipsis));
-  }
-
-  /// Parse a `=` token.
-  ParseResult parseEqual() override {
-    return parser.parseToken(Token::equal, "expected '='");
-  }
-
-  /// Parse a `=` token if present.
-  ParseResult parseOptionalEqual() override {
-    return success(parser.consumeIf(Token::equal));
-  }
-
-  /// Parse a '<' token.
-  ParseResult parseLess() override {
-    return parser.parseToken(Token::less, "expected '<'");
-  }
-
-  /// Parse a '<' token if present.
-  ParseResult parseOptionalLess() override {
-    return success(parser.consumeIf(Token::less));
-  }
-
-  /// Parse a '>' token.
-  ParseResult parseGreater() override {
-    return parser.parseToken(Token::greater, "expected '>'");
-  }
-
-  /// Parse a '>' token if present.
-  ParseResult parseOptionalGreater() override {
-    return success(parser.consumeIf(Token::greater));
-  }
-
-  /// Parse a `(` token.
-  ParseResult parseLParen() override {
-    return parser.parseToken(Token::l_paren, "expected '('");
-  }
-
-  /// Parses a '(' if present.
-  ParseResult parseOptionalLParen() override {
-    return success(parser.consumeIf(Token::l_paren));
-  }
-
-  /// Parse a `)` token.
-  ParseResult parseRParen() override {
-    return parser.parseToken(Token::r_paren, "expected ')'");
-  }
-
-  /// Parses a ')' if present.
-  ParseResult parseOptionalRParen() override {
-    return success(parser.consumeIf(Token::r_paren));
-  }
-
-  /// Parse a `[` token.
-  ParseResult parseLSquare() override {
-    return parser.parseToken(Token::l_square, "expected '['");
-  }
-
-  /// Parses a '[' if present.
-  ParseResult parseOptionalLSquare() override {
-    return success(parser.consumeIf(Token::l_square));
-  }
-
-  /// Parse a `]` token.
-  ParseResult parseRSquare() override {
-    return parser.parseToken(Token::r_square, "expected ']'");
-  }
-
-  /// Parses a ']' if present.
-  ParseResult parseOptionalRSquare() override {
-    return success(parser.consumeIf(Token::r_square));
-  }
-
-  /// Parses a '?' token.
-  ParseResult parseQuestion() override {
-    return parser.parseToken(Token::question, "expected '?'");
-  }
-
-  /// Parses a '?' token if present.
-  ParseResult parseOptionalQuestion() override {
-    return success(parser.consumeIf(Token::question));
-  }
-
-  /// Parses a '+' token.
-  ParseResult parsePlus() override {
-    return parser.parseToken(Token::plus, "expected '+'");
-  }
-
-  /// Parses a '+' token if present.
-  ParseResult parseOptionalPlus() override {
-    return success(parser.consumeIf(Token::plus));
-  }
-
-  /// Parses a '*' token.
-  ParseResult parseStar() override {
-    return parser.parseToken(Token::star, "expected '*'");
-  }
-
-  /// Parses a '*' token if present.
-  ParseResult parseOptionalStar() override {
-    return success(parser.consumeIf(Token::star));
-  }
-
-  /// Parse an optional integer value from the stream.
-  OptionalParseResult parseOptionalInteger(APInt &result) override {
-    return parser.parseOptionalInteger(result);
-  }
-
-  //===--------------------------------------------------------------------===//
-  // Attribute Parsing
-  //===--------------------------------------------------------------------===//
-
-  /// Parse an arbitrary attribute of a given type and return it in result.
-  ParseResult parseAttribute(Attribute &result, Type type) override {
-    result = parser.parseAttribute(type);
-    return success(static_cast<bool>(result));
-  }
-
-  /// Parse an optional attribute.
-  template <typename AttrT>
-  OptionalParseResult
-  parseOptionalAttributeAndAddToList(AttrT &result, Type type,
-                                     StringRef attrName, NamedAttrList &attrs) {
-    OptionalParseResult parseResult =
-        parser.parseOptionalAttribute(result, type);
-    if (parseResult.hasValue() && succeeded(*parseResult))
-      attrs.push_back(parser.builder.getNamedAttr(attrName, result));
-    return parseResult;
-  }
-  OptionalParseResult parseOptionalAttribute(Attribute &result, Type type,
-                                             StringRef attrName,
-                                             NamedAttrList &attrs) override {
-    return parseOptionalAttributeAndAddToList(result, type, attrName, attrs);
-  }
-  OptionalParseResult parseOptionalAttribute(ArrayAttr &result, Type type,
-                                             StringRef attrName,
-                                             NamedAttrList &attrs) override {
-    return parseOptionalAttributeAndAddToList(result, type, attrName, attrs);
-  }
-  OptionalParseResult parseOptionalAttribute(StringAttr &result, Type type,
-                                             StringRef attrName,
-                                             NamedAttrList &attrs) override {
-    return parseOptionalAttributeAndAddToList(result, type, attrName, attrs);
-  }
-
-  /// Parse a named dictionary into 'result' if it is present.
-  ParseResult parseOptionalAttrDict(NamedAttrList &result) override {
-    if (parser.getToken().isNot(Token::l_brace))
-      return success();
-    return parser.parseAttributeDict(result);
-  }
-
-  /// Parse a named dictionary into 'result' if the `attributes` keyword is
-  /// present.
-  ParseResult parseOptionalAttrDictWithKeyword(NamedAttrList &result) override {
-    if (failed(parseOptionalKeyword("attributes")))
-      return success();
-    return parser.parseAttributeDict(result);
-  }
-
-  /// Parse an affine map instance into 'map'.
-  ParseResult parseAffineMap(AffineMap &map) override {
-    return parser.parseAffineMapReference(map);
-  }
-
-  /// Parse an integer set instance into 'set'.
-  ParseResult printIntegerSet(IntegerSet &set) override {
-    return parser.parseIntegerSetReference(set);
-  }
-
-  //===--------------------------------------------------------------------===//
-  // Identifier Parsing
-  //===--------------------------------------------------------------------===//
-
-  /// Returns true if the current token corresponds to a keyword.
-  bool isCurrentTokenAKeyword() const {
-    return parser.getToken().is(Token::bare_identifier) ||
-           parser.getToken().isKeyword();
-  }
-
-  /// Parse the given keyword if present.
-  ParseResult parseOptionalKeyword(StringRef keyword) override {
-    // Check that the current token has the same spelling.
-    if (!isCurrentTokenAKeyword() || parser.getTokenSpelling() != keyword)
-      return failure();
-    parser.consumeToken();
-    return success();
-  }
-
-  /// Parse a keyword, if present, into 'keyword'.
-  ParseResult parseOptionalKeyword(StringRef *keyword) override {
-    // Check that the current token is a keyword.
-    if (!isCurrentTokenAKeyword())
-      return failure();
-
-    *keyword = parser.getTokenSpelling();
-    parser.consumeToken();
-    return success();
-  }
-
-  /// Parse a keyword if it is one of the 'allowedKeywords'.
-  ParseResult
-  parseOptionalKeyword(StringRef *keyword,
-                       ArrayRef<StringRef> allowedKeywords) override {
-    // Check that the current token is a keyword.
-    if (!isCurrentTokenAKeyword())
-      return failure();
-
-    StringRef currentKeyword = parser.getTokenSpelling();
-    if (llvm::is_contained(allowedKeywords, currentKeyword)) {
-      *keyword = currentKeyword;
-      parser.consumeToken();
-      return success();
-    }
-
-    return failure();
-  }
-
-  /// Parse an optional @-identifier and store it (without the '@' symbol) in a
-  /// string attribute named 'attrName'.
-  ParseResult parseOptionalSymbolName(StringAttr &result, StringRef attrName,
-                                      NamedAttrList &attrs) override {
-    Token atToken = parser.getToken();
-    if (atToken.isNot(Token::at_identifier))
-      return failure();
-
-    result = getBuilder().getStringAttr(atToken.getSymbolReference());
-    attrs.push_back(getBuilder().getNamedAttr(attrName, result));
-    parser.consumeToken();
-    return success();
+  /// Emit a diagnostic at the specified location and return failure.
+  InFlightDiagnostic emitError(SMLoc loc, const Twine &message) override {
+    return AsmParserImpl<OpAsmParser>::emitError(loc, "custom op '" + opName +
+                                                          "' " + message);
   }
 
   //===--------------------------------------------------------------------===//
@@ -1364,17 +1270,17 @@ public:
   //===--------------------------------------------------------------------===//
 
   /// Parse a single operand.
-  ParseResult parseOperand(OperandType &result) override {
-    OperationParser::SSAUseInfo useInfo;
+  ParseResult parseOperand(UnresolvedOperand &result) override {
+    OperationParser::UnresolvedOperand useInfo;
     if (parser.parseSSAUse(useInfo))
       return failure();
 
-    result = {useInfo.loc, useInfo.name, useInfo.number};
+    result = {useInfo.location, useInfo.name, useInfo.number};
     return success();
   }
 
   /// Parse a single operand if present.
-  OptionalParseResult parseOptionalOperand(OperandType &result) override {
+  OptionalParseResult parseOptionalOperand(UnresolvedOperand &result) override {
     if (parser.getToken().is(Token::percent_identifier))
       return parseOperand(result);
     return llvm::None;
@@ -1382,7 +1288,7 @@ public:
 
   /// Parse zero or more SSA comma-separated operand references with a specified
   /// surrounding delimiter, and an optional required operand count.
-  ParseResult parseOperandList(SmallVectorImpl<OperandType> &result,
+  ParseResult parseOperandList(SmallVectorImpl<UnresolvedOperand> &result,
                                int requiredOperandCount = -1,
                                Delimiter delimiter = Delimiter::None) override {
     return parseOperandOrRegionArgList(result, /*isOperandList=*/true,
@@ -1392,72 +1298,42 @@ public:
   /// Parse zero or more SSA comma-separated operand or region arguments with
   ///  optional surrounding delimiter and required operand count.
   ParseResult
-  parseOperandOrRegionArgList(SmallVectorImpl<OperandType> &result,
+  parseOperandOrRegionArgList(SmallVectorImpl<UnresolvedOperand> &result,
                               bool isOperandList, int requiredOperandCount = -1,
                               Delimiter delimiter = Delimiter::None) {
     auto startLoc = parser.getToken().getLoc();
 
-    // Handle delimiters.
-    switch (delimiter) {
-    case Delimiter::None:
-      // Don't check for the absence of a delimiter if the number of operands
-      // is unknown (and hence the operand list could be empty).
-      if (requiredOperandCount == -1)
-        break;
-      // Token already matches an identifier and so can't be a delimiter.
-      if (parser.getToken().is(Token::percent_identifier))
-        break;
-      // Test against known delimiters.
-      if (parser.getToken().is(Token::l_paren) ||
-          parser.getToken().is(Token::l_square))
-        return emitError(startLoc, "unexpected delimiter");
-      return emitError(startLoc, "invalid operand");
-    case Delimiter::OptionalParen:
-      if (parser.getToken().isNot(Token::l_paren))
-        return success();
-      LLVM_FALLTHROUGH;
-    case Delimiter::Paren:
-      if (parser.parseToken(Token::l_paren, "expected '(' in operand list"))
-        return failure();
-      break;
-    case Delimiter::OptionalSquare:
-      if (parser.getToken().isNot(Token::l_square))
-        return success();
-      LLVM_FALLTHROUGH;
-    case Delimiter::Square:
-      if (parser.parseToken(Token::l_square, "expected '[' in operand list"))
-        return failure();
-      break;
+    // The no-delimiter case has some special handling for better diagnostics.
+    if (delimiter == Delimiter::None) {
+      // parseCommaSeparatedList doesn't handle the missing case for "none",
+      // so we handle it custom here.
+      if (parser.getToken().isNot(Token::percent_identifier)) {
+        // If we didn't require any operands or required exactly zero (weird)
+        // then this is success.
+        if (requiredOperandCount == -1 || requiredOperandCount == 0)
+          return success();
+
+        // Otherwise, try to produce a nice error message.
+        if (parser.getToken().is(Token::l_paren) ||
+            parser.getToken().is(Token::l_square))
+          return emitError(startLoc, "unexpected delimiter");
+        return emitError(startLoc, "invalid operand");
+      }
     }
 
-    // Check for zero operands.
-    if (parser.getToken().is(Token::percent_identifier)) {
-      do {
-        OperandType operandOrArg;
-        if (isOperandList ? parseOperand(operandOrArg)
-                          : parseRegionArgument(operandOrArg))
-          return failure();
-        result.push_back(operandOrArg);
-      } while (parser.consumeIf(Token::comma));
-    }
-
-    // Handle delimiters.   If we reach here, the optional delimiters were
-    // present, so we need to parse their closing one.
-    switch (delimiter) {
-    case Delimiter::None:
-      break;
-    case Delimiter::OptionalParen:
-    case Delimiter::Paren:
-      if (parser.parseToken(Token::r_paren, "expected ')' in operand list"))
+    auto parseOneOperand = [&]() -> ParseResult {
+      UnresolvedOperand operandOrArg;
+      if (isOperandList ? parseOperand(operandOrArg)
+                        : parseRegionArgument(operandOrArg))
         return failure();
-      break;
-    case Delimiter::OptionalSquare:
-    case Delimiter::Square:
-      if (parser.parseToken(Token::r_square, "expected ']' in operand list"))
-        return failure();
-      break;
-    }
+      result.push_back(operandOrArg);
+      return success();
+    };
 
+    if (parseCommaSeparatedList(delimiter, parseOneOperand, " in operand list"))
+      return failure();
+
+    // Check that we got the expected # of elements.
     if (requiredOperandCount != -1 &&
         result.size() != static_cast<size_t>(requiredOperandCount))
       return emitError(startLoc, "expected ")
@@ -1468,9 +1344,10 @@ public:
   /// Parse zero or more trailing SSA comma-separated trailing operand
   /// references with a specified surrounding delimiter, and an optional
   /// required operand count. A leading comma is expected before the operands.
-  ParseResult parseTrailingOperandList(SmallVectorImpl<OperandType> &result,
-                                       int requiredOperandCount,
-                                       Delimiter delimiter) override {
+  ParseResult
+  parseTrailingOperandList(SmallVectorImpl<UnresolvedOperand> &result,
+                           int requiredOperandCount,
+                           Delimiter delimiter) override {
     if (parser.getToken().is(Token::comma)) {
       parseComma();
       return parseOperandList(result, requiredOperandCount, delimiter);
@@ -1482,11 +1359,9 @@ public:
   }
 
   /// Resolve an operand to an SSA value, emitting an error on failure.
-  ParseResult resolveOperand(const OperandType &operand, Type type,
+  ParseResult resolveOperand(const UnresolvedOperand &operand, Type type,
                              SmallVectorImpl<Value> &result) override {
-    OperationParser::SSAUseInfo operandInfo = {operand.name, operand.number,
-                                               operand.location};
-    if (auto value = parser.resolveSSAUse(operandInfo, type)) {
+    if (auto value = parser.resolveSSAUse(operand, type)) {
       result.push_back(value);
       return success();
     }
@@ -1494,15 +1369,15 @@ public:
   }
 
   /// Parse an AffineMap of SSA ids.
-  ParseResult parseAffineMapOfSSAIds(SmallVectorImpl<OperandType> &operands,
-                                     Attribute &mapAttr, StringRef attrName,
-                                     NamedAttrList &attrs,
-                                     Delimiter delimiter) override {
-    SmallVector<OperandType, 2> dimOperands;
-    SmallVector<OperandType, 1> symOperands;
+  ParseResult
+  parseAffineMapOfSSAIds(SmallVectorImpl<UnresolvedOperand> &operands,
+                         Attribute &mapAttr, StringRef attrName,
+                         NamedAttrList &attrs, Delimiter delimiter) override {
+    SmallVector<UnresolvedOperand, 2> dimOperands;
+    SmallVector<UnresolvedOperand, 1> symOperands;
 
     auto parseElement = [&](bool isSymbol) -> ParseResult {
-      OperandType operand;
+      UnresolvedOperand operand;
       if (parseOperand(operand))
         return failure();
       if (isSymbol)
@@ -1529,11 +1404,11 @@ public:
 
   /// Parse an AffineExpr of SSA ids.
   ParseResult
-  parseAffineExprOfSSAIds(SmallVectorImpl<OperandType> &dimOperands,
-                          SmallVectorImpl<OperandType> &symbOperands,
+  parseAffineExprOfSSAIds(SmallVectorImpl<UnresolvedOperand> &dimOperands,
+                          SmallVectorImpl<UnresolvedOperand> &symbOperands,
                           AffineExpr &expr) override {
     auto parseElement = [&](bool isSymbol) -> ParseResult {
-      OperandType operand;
+      UnresolvedOperand operand;
       if (parseOperand(operand))
         return failure();
       if (isSymbol)
@@ -1552,52 +1427,51 @@ public:
 
   /// Parse a region that takes `arguments` of `argTypes` types.  This
   /// effectively defines the SSA values of `arguments` and assigns their type.
-  ParseResult parseRegion(Region &region, ArrayRef<OperandType> arguments,
+  ParseResult parseRegion(Region &region, ArrayRef<UnresolvedOperand> arguments,
                           ArrayRef<Type> argTypes,
+                          ArrayRef<Location> argLocations,
                           bool enableNameShadowing) override {
     assert(arguments.size() == argTypes.size() &&
            "mismatching number of arguments and types");
 
-    SmallVector<std::pair<OperationParser::SSAUseInfo, Type>, 2>
+    SmallVector<std::pair<OperationParser::UnresolvedOperand, Type>, 2>
         regionArguments;
-    for (auto pair : llvm::zip(arguments, argTypes)) {
-      const OperandType &operand = std::get<0>(pair);
-      Type type = std::get<1>(pair);
-      OperationParser::SSAUseInfo operandInfo = {operand.name, operand.number,
-                                                 operand.location};
-      regionArguments.emplace_back(operandInfo, type);
-    }
+    for (auto pair : llvm::zip(arguments, argTypes))
+      regionArguments.emplace_back(std::get<0>(pair), std::get<1>(pair));
 
     // Try to parse the region.
     (void)isIsolatedFromAbove;
     assert((!enableNameShadowing || isIsolatedFromAbove) &&
            "name shadowing is only allowed on isolated regions");
-    if (parser.parseRegion(region, regionArguments, enableNameShadowing))
+    if (parser.parseRegion(region, regionArguments, argLocations,
+                           enableNameShadowing))
       return failure();
     return success();
   }
 
   /// Parses a region if present.
   OptionalParseResult parseOptionalRegion(Region &region,
-                                          ArrayRef<OperandType> arguments,
+                                          ArrayRef<UnresolvedOperand> arguments,
                                           ArrayRef<Type> argTypes,
+                                          ArrayRef<Location> argLocations,
                                           bool enableNameShadowing) override {
     if (parser.getToken().isNot(Token::l_brace))
       return llvm::None;
-    return parseRegion(region, arguments, argTypes, enableNameShadowing);
+    return parseRegion(region, arguments, argTypes, argLocations,
+                       enableNameShadowing);
   }
 
   /// Parses a region if present. If the region is present, a new region is
   /// allocated and placed in `region`. If no region is present, `region`
   /// remains untouched.
-  OptionalParseResult
-  parseOptionalRegion(std::unique_ptr<Region> &region,
-                      ArrayRef<OperandType> arguments, ArrayRef<Type> argTypes,
-                      bool enableNameShadowing = false) override {
+  OptionalParseResult parseOptionalRegion(
+      std::unique_ptr<Region> &region, ArrayRef<UnresolvedOperand> arguments,
+      ArrayRef<Type> argTypes, bool enableNameShadowing = false) override {
     if (parser.getToken().isNot(Token::l_brace))
       return llvm::None;
     std::unique_ptr<Region> newRegion = std::make_unique<Region>();
-    if (parseRegion(*newRegion, arguments, argTypes, enableNameShadowing))
+    if (parseRegion(*newRegion, arguments, argTypes, /*argLocations=*/{},
+                    enableNameShadowing))
       return failure();
 
     region = std::move(newRegion);
@@ -1606,19 +1480,20 @@ public:
 
   /// Parse a region argument. The type of the argument will be resolved later
   /// by a call to `parseRegion`.
-  ParseResult parseRegionArgument(OperandType &argument) override {
+  ParseResult parseRegionArgument(UnresolvedOperand &argument) override {
     return parseOperand(argument);
   }
 
   /// Parse a region argument if present.
-  ParseResult parseOptionalRegionArgument(OperandType &argument) override {
+  ParseResult
+  parseOptionalRegionArgument(UnresolvedOperand &argument) override {
     if (parser.getToken().isNot(Token::percent_identifier))
       return success();
     return parseRegionArgument(argument);
   }
 
   ParseResult
-  parseRegionArgumentList(SmallVectorImpl<OperandType> &result,
+  parseRegionArgumentList(SmallVectorImpl<UnresolvedOperand> &result,
                           int requiredOperandCount = -1,
                           Delimiter delimiter = Delimiter::None) override {
     return parseOperandOrRegionArgList(result, /*isOperandList=*/false,
@@ -1660,63 +1535,16 @@ public:
   // Type Parsing
   //===--------------------------------------------------------------------===//
 
-  /// Parse a type.
-  ParseResult parseType(Type &result) override {
-    return failure(!(result = parser.parseType()));
-  }
-
-  /// Parse an optional type.
-  OptionalParseResult parseOptionalType(Type &result) override {
-    return parser.parseOptionalType(result);
-  }
-
-  /// Parse an arrow followed by a type list.
-  ParseResult parseArrowTypeList(SmallVectorImpl<Type> &result) override {
-    if (parseArrow() || parser.parseFunctionResultTypes(result))
-      return failure();
-    return success();
-  }
-
-  /// Parse an optional arrow followed by a type list.
-  ParseResult
-  parseOptionalArrowTypeList(SmallVectorImpl<Type> &result) override {
-    if (!parser.consumeIf(Token::arrow))
-      return success();
-    return parser.parseFunctionResultTypes(result);
-  }
-
-  /// Parse a colon followed by a type.
-  ParseResult parseColonType(Type &result) override {
-    return failure(parser.parseToken(Token::colon, "expected ':'") ||
-                   !(result = parser.parseType()));
-  }
-
-  /// Parse a colon followed by a type list, which must have at least one type.
-  ParseResult parseColonTypeList(SmallVectorImpl<Type> &result) override {
-    if (parser.parseToken(Token::colon, "expected ':'"))
-      return failure();
-    return parser.parseTypeListNoParens(result);
-  }
-
-  /// Parse an optional colon followed by a type list, which if present must
-  /// have at least one type.
-  ParseResult
-  parseOptionalColonTypeList(SmallVectorImpl<Type> &result) override {
-    if (!parser.consumeIf(Token::colon))
-      return success();
-    return parser.parseTypeListNoParens(result);
-  }
-
   /// Parse a list of assignments of the form
   ///   (%x1 = %y1, %x2 = %y2, ...).
-  OptionalParseResult
-  parseOptionalAssignmentList(SmallVectorImpl<OperandType> &lhs,
-                              SmallVectorImpl<OperandType> &rhs) override {
+  OptionalParseResult parseOptionalAssignmentList(
+      SmallVectorImpl<UnresolvedOperand> &lhs,
+      SmallVectorImpl<UnresolvedOperand> &rhs) override {
     if (failed(parseOptionalLParen()))
       return llvm::None;
 
     auto parseElt = [&]() -> ParseResult {
-      OperandType regionArg, operand;
+      UnresolvedOperand regionArg, operand;
       if (parseRegionArgument(regionArg) || parseEqual() ||
           parseOperand(operand))
         return failure();
@@ -1730,14 +1558,14 @@ public:
   /// Parse a list of assignments of the form
   ///   (%x1 = %y1 : type1, %x2 = %y2 : type2, ...).
   OptionalParseResult
-  parseOptionalAssignmentListWithTypes(SmallVectorImpl<OperandType> &lhs,
-                                       SmallVectorImpl<OperandType> &rhs,
+  parseOptionalAssignmentListWithTypes(SmallVectorImpl<UnresolvedOperand> &lhs,
+                                       SmallVectorImpl<UnresolvedOperand> &rhs,
                                        SmallVectorImpl<Type> &types) override {
     if (failed(parseOptionalLParen()))
       return llvm::None;
 
     auto parseElt = [&]() -> ParseResult {
-      OperandType regionArg, operand;
+      UnresolvedOperand regionArg, operand;
       Type type;
       if (parseRegionArgument(regionArg) || parseEqual() ||
           parseOperand(operand) || parseColon() || parseType(type))
@@ -1750,10 +1578,35 @@ public:
     return parser.parseCommaSeparatedListUntil(Token::r_paren, parseElt);
   }
 
-private:
-  /// The source location of the operation name.
-  SMLoc nameLoc;
+  /// Parse a loc(...) specifier if present, filling in result if so.
+  ParseResult
+  parseOptionalLocationSpecifier(Optional<Location> &result) override {
+    // If there is a 'loc' we parse a trailing location.
+    if (!parser.consumeIf(Token::kw_loc))
+      return success();
+    LocationAttr directLoc;
+    if (parser.parseToken(Token::l_paren, "expected '(' in location"))
+      return failure();
 
+    Token tok = parser.getToken();
+
+    // Check to see if we are parsing a location alias.
+    // Otherwise, we parse the location directly.
+    if (tok.is(Token::hash_identifier)) {
+      if (parser.parseLocationAlias(directLoc))
+        return failure();
+    } else if (parser.parseLocationInstance(directLoc)) {
+      return failure();
+    }
+
+    if (parser.parseToken(Token::r_paren, "expected ')' in location"))
+      return failure();
+
+    result = directLoc;
+    return success();
+  }
+
+private:
   /// Information about the result name specifiers.
   ArrayRef<OperationParser::ResultRecord> resultIDs;
 
@@ -1762,54 +1615,80 @@ private:
   bool isIsolatedFromAbove;
   StringRef opName;
 
-  /// The main operation parser.
+  /// The backing operation parser.
   OperationParser &parser;
-
-  /// A flag that indicates if any errors were emitted during parsing.
-  bool emittedError = false;
 };
-} // end anonymous namespace.
+} // namespace
 
-Operation *
-OperationParser::parseCustomOperation(ArrayRef<ResultRecord> resultIDs) {
-  llvm::SMLoc opLoc = getToken().getLoc();
-  StringRef opName = getTokenSpelling();
-  auto *opDefinition = AbstractOperation::lookup(opName, getContext());
+FailureOr<OperationName> OperationParser::parseCustomOperationName() {
+  std::string opName = getTokenSpelling().str();
+  if (opName.empty())
+    return (emitError("empty operation name is invalid"), failure());
+
+  consumeToken();
+
+  Optional<RegisteredOperationName> opInfo =
+      RegisteredOperationName::lookup(opName, getContext());
+  StringRef defaultDialect = getState().defaultDialectStack.back();
   Dialect *dialect = nullptr;
-  if (opDefinition) {
-    dialect = &opDefinition->dialect;
+  if (opInfo) {
+    dialect = &opInfo->getDialect();
   } else {
-    if (opName.contains('.')) {
+    if (StringRef(opName).contains('.')) {
       // This op has a dialect, we try to check if we can register it in the
       // context on the fly.
-      StringRef dialectName = opName.split('.').first;
+      StringRef dialectName = StringRef(opName).split('.').first;
       dialect = getContext()->getLoadedDialect(dialectName);
       if (!dialect && (dialect = getContext()->getOrLoadDialect(dialectName)))
-        opDefinition = AbstractOperation::lookup(opName, getContext());
+        opInfo = RegisteredOperationName::lookup(opName, getContext());
     } else {
-      // If the operation name has no namespace prefix we treat it as a standard
-      // operation and prefix it with "std".
-      // TODO: Would it be better to just build a mapping of the registered
-      // operations in the standard dialect?
-      if (getContext()->getOrLoadDialect("std")) {
-        opDefinition = AbstractOperation::lookup(Twine("std." + opName).str(),
+      // If the operation name has no namespace prefix we lookup the current
+      // default dialect (set through OpAsmOpInterface).
+      opInfo = RegisteredOperationName::lookup(
+          Twine(defaultDialect + "." + opName).str(), getContext());
+      // FIXME: Remove this in favor of using default dialects.
+      if (!opInfo && getContext()->getOrLoadDialect("func")) {
+        opInfo = RegisteredOperationName::lookup(Twine("func." + opName).str(),
                                                  getContext());
-        if (opDefinition)
-          opName = opDefinition->name.strref();
+      }
+      if (opInfo) {
+        dialect = &opInfo->getDialect();
+        opName = opInfo->getStringRef().str();
+      } else if (!defaultDialect.empty()) {
+        dialect = getContext()->getOrLoadDialect(defaultDialect);
+        opName = (defaultDialect + "." + opName).str();
       }
     }
   }
 
+  return OperationName(opName, getContext());
+}
+
+Operation *
+OperationParser::parseCustomOperation(ArrayRef<ResultRecord> resultIDs) {
+  SMLoc opLoc = getToken().getLoc();
+
+  FailureOr<OperationName> opNameInfo = parseCustomOperationName();
+  if (failed(opNameInfo))
+    return nullptr;
+
+  StringRef opName = opNameInfo->getStringRef();
+  Dialect *dialect = opNameInfo->getDialect();
+  Optional<RegisteredOperationName> opInfo = opNameInfo->getRegisteredInfo();
+
   // This is the actual hook for the custom op parsing, usually implemented by
   // the op itself (`Op::parse()`). We retrieve it either from the
-  // AbstractOperation or from the Dialect.
-  std::function<ParseResult(OpAsmParser &, OperationState &)> parseAssemblyFn;
+  // RegisteredOperationName or from the Dialect.
+  function_ref<ParseResult(OpAsmParser &, OperationState &)> parseAssemblyFn;
   bool isIsolatedFromAbove = false;
 
-  if (opDefinition) {
-    parseAssemblyFn = opDefinition->getParseAssemblyFn();
-    isIsolatedFromAbove =
-        opDefinition->hasTrait<OpTrait::IsIsolatedFromAbove>();
+  StringRef defaultDialect = "";
+  if (opInfo) {
+    parseAssemblyFn = opInfo->getParseAssemblyFn();
+    isIsolatedFromAbove = opInfo->hasTrait<OpTrait::IsIsolatedFromAbove>();
+    auto *iface = opInfo->getInterface<OpAsmOpInterface>();
+    if (iface && !iface->getDefaultDialect().empty())
+      defaultDialect = iface->getDefaultDialect();
   } else {
     Optional<Dialect::ParseOpHook> dialectHook;
     if (dialect)
@@ -1820,20 +1699,24 @@ OperationParser::parseCustomOperation(ArrayRef<ResultRecord> resultIDs) {
     }
     parseAssemblyFn = *dialectHook;
   }
-
-  consumeToken();
+  getState().defaultDialectStack.push_back(defaultDialect);
+  auto restoreDefaultDialect = llvm::make_scope_exit(
+      [&]() { getState().defaultDialectStack.pop_back(); });
 
   // If the custom op parser crashes, produce some indication to help
   // debugging.
-  std::string opNameStr = opName.str();
   llvm::PrettyStackTraceFormat fmt("MLIR Parser: custom op parser '%s'",
-                                   opNameStr.c_str());
+                                   opNameInfo->getIdentifier().data());
 
   // Get location information for the operation.
   auto srcLocation = getEncodedSourceLocation(opLoc);
+  OperationState opState(srcLocation, *opNameInfo);
+
+  // If we are populating the parser state, start a new operation definition.
+  if (state.asmState)
+    state.asmState->startOperationDefinition(opState.name);
 
   // Have the op implementation take a crack and parsing this.
-  OperationState opState(srcLocation, opName);
   CleanupOpStateRegions guard{opState};
   CustomOpAsmParser opAsmParser(opLoc, resultIDs, parseAssemblyFn,
                                 isIsolatedFromAbove, opName, *this);
@@ -1845,13 +1728,41 @@ OperationParser::parseCustomOperation(ArrayRef<ResultRecord> resultIDs) {
     return nullptr;
 
   // Otherwise, create the operation and try to parse a location for it.
-  Operation *op = opBuilder.createOperation(opState);
-  if (parseTrailingOperationLocation(op))
+  Operation *op = opBuilder.create(opState);
+  if (parseTrailingLocationSpecifier(op))
     return nullptr;
   return op;
 }
 
-ParseResult OperationParser::parseTrailingOperationLocation(Operation *op) {
+ParseResult OperationParser::parseLocationAlias(LocationAttr &loc) {
+  Token tok = getToken();
+  consumeToken(Token::hash_identifier);
+  StringRef identifier = tok.getSpelling().drop_front();
+  if (identifier.contains('.')) {
+    return emitError(tok.getLoc())
+           << "expected location, but found dialect attribute: '#" << identifier
+           << "'";
+  }
+
+  // If this alias can be resolved, do it now.
+  Attribute attr = state.symbols.attributeAliasDefinitions.lookup(identifier);
+  if (attr) {
+    if (!(loc = attr.dyn_cast<LocationAttr>()))
+      return emitError(tok.getLoc())
+             << "expected location, but found '" << attr << "'";
+  } else {
+    // Otherwise, remember this operation and resolve its location later.
+    // In the meantime, use a special OpaqueLoc as a marker.
+    loc = OpaqueLoc::get(deferredLocsReferences.size(),
+                         TypeID::get<DeferredLocInfo *>(),
+                         UnknownLoc::get(getContext()));
+    deferredLocsReferences.push_back(DeferredLocInfo{tok.getLoc(), identifier});
+  }
+  return success();
+}
+
+ParseResult
+OperationParser::parseTrailingLocationSpecifier(OpOrArgument opOrArgument) {
   // If there is a 'loc' we parse a trailing location.
   if (!consumeIf(Token::kw_loc))
     return success();
@@ -1860,29 +1771,11 @@ ParseResult OperationParser::parseTrailingOperationLocation(Operation *op) {
   Token tok = getToken();
 
   // Check to see if we are parsing a location alias.
+  // Otherwise, we parse the location directly.
   LocationAttr directLoc;
   if (tok.is(Token::hash_identifier)) {
-    consumeToken();
-
-    StringRef identifier = tok.getSpelling().drop_front();
-    if (identifier.contains('.')) {
-      return emitError(tok.getLoc())
-             << "expected location, but found dialect attribute: '#"
-             << identifier << "'";
-    }
-
-    // If this alias can be resolved, do it now.
-    Attribute attr = state.symbols.attributeAliasDefinitions.lookup(identifier);
-    if (attr) {
-      if (!(directLoc = attr.dyn_cast<LocationAttr>()))
-        return emitError(tok.getLoc())
-               << "expected location, but found '" << attr << "'";
-    } else {
-      // Otherwise, remember this operation and resolve its location later.
-      opsWithDeferredLocs.emplace_back(op, tok);
-    }
-
-    // Otherwise, we parse the location directly.
+    if (parseLocationAlias(directLoc))
+      return failure();
   } else if (parseLocationInstance(directLoc)) {
     return failure();
   }
@@ -1890,8 +1783,10 @@ ParseResult OperationParser::parseTrailingOperationLocation(Operation *op) {
   if (parseToken(Token::r_paren, "expected ')' in location"))
     return failure();
 
-  if (directLoc)
+  if (auto *op = opOrArgument.dyn_cast<Operation *>())
     op->setLoc(directLoc);
+  else
+    opOrArgument.get<BlockArgument>().setLoc(directLoc);
   return success();
 }
 
@@ -1899,63 +1794,89 @@ ParseResult OperationParser::parseTrailingOperationLocation(Operation *op) {
 // Region Parsing
 //===----------------------------------------------------------------------===//
 
-/// Region.
-///
-///   region ::= '{' region-body
-///
 ParseResult OperationParser::parseRegion(
     Region &region,
-    ArrayRef<std::pair<OperationParser::SSAUseInfo, Type>> entryArguments,
-    bool isIsolatedNameScope) {
+    ArrayRef<std::pair<OperationParser::UnresolvedOperand, Type>>
+        entryArguments,
+    ArrayRef<Location> argLocations, bool isIsolatedNameScope) {
   // Parse the '{'.
   Token lBraceTok = getToken();
   if (parseToken(Token::l_brace, "expected '{' to begin a region"))
     return failure();
 
-  // Check for an empty region.
-  if (entryArguments.empty() && consumeIf(Token::r_brace))
-    return success();
+  // If we are populating the parser state, start a new region definition.
+  if (state.asmState)
+    state.asmState->startRegionDefinition();
+
+  // Parse the region body.
+  if ((!entryArguments.empty() || getToken().isNot(Token::r_brace)) &&
+      parseRegionBody(region, lBraceTok.getLoc(), entryArguments, argLocations,
+                      isIsolatedNameScope)) {
+    return failure();
+  }
+  consumeToken(Token::r_brace);
+
+  // If we are populating the parser state, finalize this region.
+  if (state.asmState)
+    state.asmState->finalizeRegionDefinition();
+
+  return success();
+}
+
+ParseResult OperationParser::parseRegionBody(
+    Region &region, SMLoc startLoc,
+    ArrayRef<std::pair<OperationParser::UnresolvedOperand, Type>>
+        entryArguments,
+    ArrayRef<Location> argLocations, bool isIsolatedNameScope) {
+  assert(argLocations.empty() || argLocations.size() == entryArguments.size());
   auto currentPt = opBuilder.saveInsertionPoint();
 
   // Push a new named value scope.
   pushSSANameScope(isIsolatedNameScope);
 
   // Parse the first block directly to allow for it to be unnamed.
-  auto owning_block = std::make_unique<Block>();
-  Block *block = owning_block.get();
+  auto owningBlock = std::make_unique<Block>();
+  Block *block = owningBlock.get();
 
   // If this block is not defined in the source file, add a definition for it
   // now in the assembly state. Blocks with a name will be defined when the name
   // is parsed.
   if (state.asmState && getToken().isNot(Token::caret_identifier))
-    state.asmState->addDefinition(block, lBraceTok.getLoc());
+    state.asmState->addDefinition(block, startLoc);
 
   // Add arguments to the entry block.
   if (!entryArguments.empty()) {
-    for (auto &placeholderArgPair : entryArguments) {
+    // If we had named arguments, then don't allow a block name.
+    if (getToken().is(Token::caret_identifier))
+      return emitError("invalid block name in region with named arguments");
+
+    for (const auto &it : llvm::enumerate(entryArguments)) {
+      size_t argIndex = it.index();
+      auto &placeholderArgPair = it.value();
       auto &argInfo = placeholderArgPair.first;
 
       // Ensure that the argument was not already defined.
       if (auto defLoc = getReferenceLoc(argInfo.name, argInfo.number)) {
-        return emitError(argInfo.loc, "region entry argument '" + argInfo.name +
-                                          "' is already in use")
+        return emitError(argInfo.location, "region entry argument '" +
+                                               argInfo.name +
+                                               "' is already in use")
                    .attachNote(getEncodedSourceLocation(*defLoc))
                << "previously referenced here";
       }
-      BlockArgument arg = block->addArgument(placeholderArgPair.second);
+      BlockArgument arg = block->addArgument(
+          placeholderArgPair.second,
+          argLocations.empty()
+              ? getEncodedSourceLocation(placeholderArgPair.first.location)
+              : argLocations[argIndex]);
 
       // Add a definition of this arg to the assembly state if provided.
       if (state.asmState)
-        state.asmState->addDefinition(arg, argInfo.loc);
+        state.asmState->addDefinition(arg, argInfo.location);
 
       // Record the definition for this argument.
       if (addDefinition(argInfo, arg))
         return failure();
     }
-
-    // If we had named arguments, then don't allow a block name.
-    if (getToken().is(Token::caret_identifier))
-      return emitError("invalid block name in region with named arguments");
   }
 
   if (parseBlock(block))
@@ -1968,9 +1889,13 @@ ParseResult OperationParser::parseRegion(
   }
 
   // Parse the rest of the region.
-  region.push_back(owning_block.release());
-  if (parseRegionBody(region))
-    return failure();
+  region.push_back(owningBlock.release());
+  while (getToken().isNot(Token::r_brace)) {
+    Block *newBlock = nullptr;
+    if (parseBlock(newBlock))
+      return failure();
+    region.push_back(newBlock);
+  }
 
   // Pop the SSA value scope for this region.
   if (popSSANameScope())
@@ -1978,21 +1903,6 @@ ParseResult OperationParser::parseRegion(
 
   // Reset the original insertion point.
   opBuilder.restoreInsertionPoint(currentPt);
-  return success();
-}
-
-/// Region.
-///
-///   region-body ::= block* '}'
-///
-ParseResult OperationParser::parseRegionBody(Region &region) {
-  // Parse the list of blocks.
-  while (!consumeIf(Token::r_brace)) {
-    Block *newBlock = nullptr;
-    if (parseBlock(newBlock))
-      return failure();
-    region.push_back(newBlock);
-  }
   return success();
 }
 
@@ -2018,23 +1928,51 @@ ParseResult OperationParser::parseBlock(Block *&block) {
   if (parseToken(Token::caret_identifier, "expected block name"))
     return failure();
 
-  block = defineBlockNamed(name, nameLoc, block);
+  // Define the block with the specified name.
+  auto &blockAndLoc = getBlockInfoByName(name);
+  blockAndLoc.loc = nameLoc;
 
-  // Fail if the block was already defined.
-  if (!block)
+  // Use a unique pointer for in-flight block being parsed. Release ownership
+  // only in the case of a successful parse. This ensures that the Block
+  // allocated is released if the parse fails and control returns early.
+  std::unique_ptr<Block> inflightBlock;
+
+  // If a block has yet to be set, this is a new definition. If the caller
+  // provided a block, use it. Otherwise create a new one.
+  if (!blockAndLoc.block) {
+    if (block) {
+      blockAndLoc.block = block;
+    } else {
+      inflightBlock = std::make_unique<Block>();
+      blockAndLoc.block = inflightBlock.get();
+    }
+
+    // Otherwise, the block has a forward declaration. Forward declarations are
+    // removed once defined, so if we are defining a existing block and it is
+    // not a forward declaration, then it is a redeclaration. Fail if the block
+    // was already defined.
+  } else if (!eraseForwardRef(blockAndLoc.block)) {
     return emitError(nameLoc, "redefinition of block '") << name << "'";
+  }
+
+  // Populate the high level assembly state if necessary.
+  if (state.asmState)
+    state.asmState->addDefinition(blockAndLoc.block, nameLoc);
+
+  block = blockAndLoc.block;
 
   // If an argument list is present, parse it.
-  if (consumeIf(Token::l_paren)) {
-    if (parseOptionalBlockArgList(block) ||
-        parseToken(Token::r_paren, "expected ')' to end argument list"))
+  if (getToken().is(Token::l_paren))
+    if (parseOptionalBlockArgList(block))
       return failure();
-  }
 
   if (parseToken(Token::colon, "expected ':' after block name"))
     return failure();
 
-  return parseBlockBody(block);
+  ParseResult res = parseBlockBody(block);
+  if (succeeded(res))
+    inflightBlock.release();
+  return res;
 }
 
 ParseResult OperationParser::parseBlockBody(Block *block) {
@@ -2066,35 +2004,11 @@ Block *OperationParser::getBlockNamed(StringRef name, SMLoc loc) {
   return blockDef.block;
 }
 
-/// Define the block with the specified name. Returns the Block* or nullptr in
-/// the case of redefinition.
-Block *OperationParser::defineBlockNamed(StringRef name, SMLoc loc,
-                                         Block *existing) {
-  auto &blockAndLoc = getBlockInfoByName(name);
-  blockAndLoc.loc = loc;
-
-  // If a block has yet to be set, this is a new definition. If the caller
-  // provided a block, use it. Otherwise create a new one.
-  if (!blockAndLoc.block) {
-    blockAndLoc.block = existing ? existing : new Block();
-
-    // Otherwise, the block has a forward declaration. Forward declarations are
-    // removed once defined, so if we are defining a existing block and it is
-    // not a forward declaration, then it is a redeclaration.
-  } else if (!eraseForwardRef(blockAndLoc.block)) {
-    return nullptr;
-  }
-
-  // Populate the high level assembly state if necessary.
-  if (state.asmState)
-    state.asmState->addDefinition(blockAndLoc.block, loc);
-
-  return blockAndLoc.block;
-}
-
-/// Parse a (possibly empty) list of SSA operands with types as block arguments.
+/// Parse a (possibly empty) list of SSA operands with types as block arguments
+/// enclosed in parentheses.
 ///
-///   ssa-id-and-type-list ::= ssa-id-and-type (`,` ssa-id-and-type)*
+///   value-id-and-type-list ::= value-id-and-type (`,` ssa-id-and-type)*
+///   block-arg-list ::= `(` value-id-and-type-list? `)`
 ///
 ParseResult OperationParser::parseOptionalBlockArgList(Block *owner) {
   if (getToken().is(Token::r_brace))
@@ -2105,9 +2019,9 @@ ParseResult OperationParser::parseOptionalBlockArgList(Block *owner) {
   bool definingExistingArgs = owner->getNumArguments() != 0;
   unsigned nextArgument = 0;
 
-  return parseCommaSeparatedList([&]() -> ParseResult {
+  return parseCommaSeparatedList(Delimiter::Paren, [&]() -> ParseResult {
     return parseSSADefOrUseAndType(
-        [&](SSAUseInfo useInfo, Type type) -> ParseResult {
+        [&](UnresolvedOperand useInfo, Type type) -> ParseResult {
           BlockArgument arg;
 
           // If we are defining existing arguments, ensure that the argument
@@ -2122,13 +2036,19 @@ ParseResult OperationParser::parseOptionalBlockArgList(Block *owner) {
             if (arg.getType() != type)
               return emitError("argument and block argument type mismatch");
           } else {
-            arg = owner->addArgument(type);
+            auto loc = getEncodedSourceLocation(useInfo.location);
+            arg = owner->addArgument(type, loc);
           }
+
+          // If the argument has an explicit loc(...) specifier, parse and apply
+          // it.
+          if (parseTrailingLocationSpecifier(arg))
+            return failure();
 
           // Mark this block argument definition in the parser state if it was
           // provided.
           if (state.asmState)
-            state.asmState->addDefinition(arg, useInfo.loc);
+            state.asmState->addDefinition(arg, useInfo.location);
 
           return addDefinition(useInfo, arg);
         });
@@ -2156,7 +2076,7 @@ private:
   /// Parse an attribute alias declaration.
   ParseResult parseTypeAliasDef();
 };
-} // end anonymous namespace
+} // namespace
 
 /// Parses an attribute alias declaration.
 ///
@@ -2227,7 +2147,7 @@ ParseResult TopLevelOperationParser::parseTypeAliasDef() {
 ParseResult TopLevelOperationParser::parse(Block *topLevelBlock,
                                            Location parserLoc) {
   // Create a top-level operation to contain the parsed state.
-  OwningOpRef<Operation *> topLevelOp(ModuleOp::create(parserLoc));
+  OwningOpRef<ModuleOp> topLevelOp(ModuleOp::create(parserLoc));
   OperationParser opParser(state, topLevelOp.get());
   while (true) {
     switch (getToken().getKind()) {
@@ -2242,13 +2162,9 @@ ParseResult TopLevelOperationParser::parse(Block *topLevelBlock,
       if (opParser.finalize())
         return failure();
 
-      // Verify that the parsed operations are valid.
-      if (failed(verify(topLevelOp.get())))
-        return failure();
-
       // Splice the blocks of the parsed operation over to the provided
       // top-level block.
-      auto &parsedOps = (*topLevelOp)->getRegion(0).front().getOperations();
+      auto &parsedOps = topLevelOp->getBody()->getOperations();
       auto &destOps = topLevelBlock->getOperations();
       destOps.splice(destOps.empty() ? destOps.end() : std::prev(destOps.end()),
                      parsedOps, parsedOps.begin(), parsedOps.end());
@@ -2311,13 +2227,13 @@ LogicalResult mlir::parseSourceFile(llvm::StringRef filename,
     return emitError(mlir::UnknownLoc::get(context),
                      "only main buffer parsed at the moment");
   }
-  auto file_or_err = llvm::MemoryBuffer::getFileOrSTDIN(filename);
-  if (std::error_code error = file_or_err.getError())
+  auto fileOrErr = llvm::MemoryBuffer::getFileOrSTDIN(filename);
+  if (std::error_code error = fileOrErr.getError())
     return emitError(mlir::UnknownLoc::get(context),
                      "could not open input file " + filename);
 
   // Load the MLIR source file.
-  sourceMgr.AddNewSourceBuffer(std::move(*file_or_err), llvm::SMLoc());
+  sourceMgr.AddNewSourceBuffer(std::move(*fileOrErr), SMLoc());
   return parseSourceFile(sourceMgr, block, context, sourceFileLoc, asmState);
 }
 

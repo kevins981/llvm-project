@@ -106,6 +106,10 @@ public:
   /// When true, a PCH with compiler errors will not be rejected.
   bool AllowPCHWithCompilerErrors = false;
 
+  /// When true, a PCH with modules cache path different to the current
+  /// compilation will not be rejected.
+  bool AllowPCHWithDifferentModulesCachePath = false;
+
   /// Dump declarations that are deserialized from PCH, for testing.
   bool DumpDeserializedPCHDecls = false;
 
@@ -124,7 +128,8 @@ public:
   ///
   /// When the lexer is done, one of the things that need to be preserved is the
   /// conditional #if stack, so the ASTWriter/ASTReader can save/restore it when
-  /// processing the rest of the file.
+  /// processing the rest of the file. Similarly, we track an unterminated
+  /// #pragma assume_nonnull.
   bool GeneratePreamble = false;
 
   /// Whether to write comment locations into the PCH when building it.
@@ -194,9 +199,6 @@ public:
   /// other instances will see that the module has failed and won't try to
   /// build it again.
   std::shared_ptr<FailedModulesSet> FailedModules;
-
-  /// A prefix map for __FILE__ and __BASE_FILE__.
-  std::map<std::string, std::string, std::greater<std::string>> MacroPrefixMap;
 
   /// Contains the currently active skipped range mappings for skipping excluded
   /// conditional directives.

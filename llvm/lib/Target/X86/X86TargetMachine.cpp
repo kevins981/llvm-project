@@ -27,9 +27,11 @@
 #include "llvm/ADT/Triple.h"
 #include "llvm/Analysis/TargetTransformInfo.h"
 #include "llvm/CodeGen/ExecutionDomainFix.h"
+#include "llvm/CodeGen/GlobalISel/CSEInfo.h"
 #include "llvm/CodeGen/GlobalISel/CallLowering.h"
 #include "llvm/CodeGen/GlobalISel/IRTranslator.h"
 #include "llvm/CodeGen/GlobalISel/InstructionSelect.h"
+#include "llvm/CodeGen/GlobalISel/InstructionSelector.h"
 #include "llvm/CodeGen/GlobalISel/Legalizer.h"
 #include "llvm/CodeGen/GlobalISel/RegBankSelect.h"
 #include "llvm/CodeGen/MachineScheduler.h"
@@ -39,11 +41,11 @@
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/Function.h"
 #include "llvm/MC/MCAsmInfo.h"
+#include "llvm/MC/TargetRegistry.h"
 #include "llvm/Pass.h"
 #include "llvm/Support/CodeGen.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/ErrorHandling.h"
-#include "llvm/Support/TargetRegistry.h"
 #include "llvm/Target/TargetLoweringObjectFile.h"
 #include "llvm/Target/TargetOptions.h"
 #include "llvm/Transforms/CFGuard.h"
@@ -110,9 +112,7 @@ static std::string computeDataLayout(const Triple &TT) {
 
   Ret += DataLayout::getManglingComponent(TT);
   // X86 and x32 have 32 bit pointers.
-  if ((TT.isArch64Bit() &&
-       (TT.getEnvironment() == Triple::GNUX32 || TT.isOSNaCl())) ||
-      !TT.isArch64Bit())
+  if (!TT.isArch64Bit() || TT.isX32() || TT.isOSNaCl())
     Ret += "-p:32:32";
 
   // Address spaces for 32 bit signed, 32 bit unsigned, and 64 bit pointers.
@@ -129,7 +129,7 @@ static std::string computeDataLayout(const Triple &TT) {
   // Some ABIs align long double to 128 bits, others to 32.
   if (TT.isOSNaCl() || TT.isOSIAMCU())
     ; // No f80
-  else if (TT.isArch64Bit() || TT.isOSDarwin())
+  else if (TT.isArch64Bit() || TT.isOSDarwin() || TT.isWindowsMSVCEnvironment())
     Ret += "-f80:128";
   else
     Ret += "-f80:32";
@@ -316,8 +316,8 @@ X86TargetMachine::getSubtargetImpl(const Function &F) const {
     resetTargetOptions(F);
     I = std::make_unique<X86Subtarget>(
         TargetTriple, CPU, TuneCPU, FS, *this,
-        MaybeAlign(Options.StackAlignmentOverride), PreferVectorWidthOverride,
-        RequiredVectorWidth);
+        MaybeAlign(F.getParent()->getOverrideStackAlignment()),
+        PreferVectorWidthOverride, RequiredVectorWidth);
   }
   return I.get();
 }
@@ -335,7 +335,7 @@ bool X86TargetMachine::isNoopAddrSpaceCast(unsigned SrcAS,
 //===----------------------------------------------------------------------===//
 
 TargetTransformInfo
-X86TargetMachine::getTargetTransformInfo(const Function &F) {
+X86TargetMachine::getTargetTransformInfo(const Function &F) const {
   return TargetTransformInfo(X86TTIImpl(this, F));
 }
 
@@ -443,6 +443,9 @@ void X86PassConfig::addIRPasses() {
       addPass(createCFGuardCheckPass());
     }
   }
+
+  if (TM->Options.JMCInstrument)
+    addPass(createJMCInstrumenterPass());
 }
 
 bool X86PassConfig::addInstSelector() {
@@ -505,7 +508,7 @@ void X86PassConfig::addPreRegAlloc() {
 
   addPass(createX86SpeculativeLoadHardeningPass());
   addPass(createX86FlagsCopyLoweringPass());
-  addPass(createX86WinAllocaExpander());
+  addPass(createX86DynAllocaExpander());
 
   if (getOptLevel() != CodeGenOpt::None) {
     addPass(createX86PreTileConfigPass());
@@ -587,6 +590,21 @@ void X86PassConfig::addPreEmitPass2() {
     addPass(createEHContGuardCatchretPass());
   }
   addPass(createX86LoadValueInjectionRetHardeningPass());
+
+  // Insert pseudo probe annotation for callsite profiling
+  addPass(createPseudoProbeInserter());
+
+  // On Darwin platforms, BLR_RVMARKER pseudo instructions are lowered to
+  // bundles.
+  if (TT.isOSDarwin())
+    addPass(createUnpackMachineBundles([](const MachineFunction &MF) {
+      // Only run bundle expansion if there are relevant ObjC runtime functions
+      // present in the module.
+      const Function &F = MF.getFunction();
+      const Module *M = F.getParent();
+      return M->getFunction("objc_retainAutoreleasedReturnValue") ||
+             M->getFunction("objc_unsafeClaimAutoreleasedReturnValue");
+    }));
 }
 
 bool X86PassConfig::addPostFastRegAllocRewrite() {

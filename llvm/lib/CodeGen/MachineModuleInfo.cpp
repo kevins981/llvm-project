@@ -9,23 +9,19 @@
 #include "llvm/CodeGen/MachineModuleInfo.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseMap.h"
-#include "llvm/ADT/PostOrderIterator.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/TinyPtrVector.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/Passes.h"
 #include "llvm/IR/BasicBlock.h"
-#include "llvm/IR/DerivedTypes.h"
+#include "llvm/IR/Constants.h"
 #include "llvm/IR/DiagnosticInfo.h"
-#include "llvm/IR/Instructions.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
-#include "llvm/IR/Value.h"
 #include "llvm/IR/ValueHandle.h"
 #include "llvm/InitializePasses.h"
 #include "llvm/MC/MCContext.h"
 #include "llvm/MC/MCSymbol.h"
-#include "llvm/MC/MCSymbolXCOFF.h"
 #include "llvm/Pass.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/ErrorHandling.h"
@@ -218,9 +214,10 @@ void MachineModuleInfo::finalize() {
 MachineModuleInfo::MachineModuleInfo(MachineModuleInfo &&MMI)
     : TM(std::move(MMI.TM)),
       Context(MMI.TM.getTargetTriple(), MMI.TM.getMCAsmInfo(),
-              MMI.TM.getMCRegisterInfo(), MMI.TM.getObjFileLowering(),
-              MMI.TM.getMCSubtargetInfo(), nullptr, nullptr, false),
+              MMI.TM.getMCRegisterInfo(), MMI.TM.getMCSubtargetInfo(), nullptr,
+              nullptr, false),
       MachineFunctions(std::move(MMI.MachineFunctions)) {
+  Context.setObjectFileInfo(MMI.TM.getObjFileLowering());
   ObjFileMMI = MMI.ObjFileMMI;
   CurCallSite = MMI.CurCallSite;
   UsesMSVCFloatingPoint = MMI.UsesMSVCFloatingPoint;
@@ -234,17 +231,19 @@ MachineModuleInfo::MachineModuleInfo(MachineModuleInfo &&MMI)
 
 MachineModuleInfo::MachineModuleInfo(const LLVMTargetMachine *TM)
     : TM(*TM), Context(TM->getTargetTriple(), TM->getMCAsmInfo(),
-                       TM->getMCRegisterInfo(), TM->getObjFileLowering(),
-                       TM->getMCSubtargetInfo(), nullptr, nullptr, false) {
+                       TM->getMCRegisterInfo(), TM->getMCSubtargetInfo(),
+                       nullptr, nullptr, false) {
+  Context.setObjectFileInfo(TM->getObjFileLowering());
   initialize();
 }
 
 MachineModuleInfo::MachineModuleInfo(const LLVMTargetMachine *TM,
                                      MCContext *ExtContext)
     : TM(*TM), Context(TM->getTargetTriple(), TM->getMCAsmInfo(),
-                       TM->getMCRegisterInfo(), TM->getObjFileLowering(),
-                       TM->getMCSubtargetInfo(), nullptr, nullptr, false),
+                       TM->getMCRegisterInfo(), TM->getMCSubtargetInfo(),
+                       nullptr, nullptr, false),
       ExternalContext(ExtContext) {
+  Context.setObjectFileInfo(TM->getObjFileLowering());
   initialize();
 }
 
@@ -397,12 +396,14 @@ bool MachineModuleInfoWrapperPass::doInitialization(Module &M) {
   // FIXME: Do this for new pass manager.
   LLVMContext &Ctx = M.getContext();
   MMI.getContext().setDiagnosticHandler(
-      [&Ctx](const SMDiagnostic &SMD, bool IsInlineAsm, const SourceMgr &SrcMgr,
-             std::vector<const MDNode *> &LocInfos) {
+      [&Ctx, &M](const SMDiagnostic &SMD, bool IsInlineAsm,
+                 const SourceMgr &SrcMgr,
+                 std::vector<const MDNode *> &LocInfos) {
         unsigned LocCookie = 0;
         if (IsInlineAsm)
           LocCookie = getLocCookie(SMD, SrcMgr, LocInfos);
-        Ctx.diagnose(DiagnosticInfoSrcMgr(SMD, IsInlineAsm, LocCookie));
+        Ctx.diagnose(
+            DiagnosticInfoSrcMgr(SMD, M.getName(), IsInlineAsm, LocCookie));
       });
   MMI.DbgInfoAvailable = !M.debug_compile_units().empty();
   return false;

@@ -87,6 +87,7 @@ public:
   DecodeStatus decodeCOMPUTE_PGM_RSRC2(uint32_t FourByteBuffer,
                                        raw_string_ostream &KdStream) const;
 
+  DecodeStatus convertFMAanyK(MCInst &MI, int ImmLitIdx) const;
   DecodeStatus convertSDWAInst(MCInst &MI) const;
   DecodeStatus convertDPP8Inst(MCInst &MI) const;
   DecodeStatus convertMIMGInst(MCInst &MI) const;
@@ -126,6 +127,8 @@ public:
   MCOperand decodeOperand_AReg_1024(unsigned Val) const;
   MCOperand decodeOperand_AV_32(unsigned Val) const;
   MCOperand decodeOperand_AV_64(unsigned Val) const;
+  MCOperand decodeOperand_AV_128(unsigned Val) const;
+  MCOperand decodeOperand_AV_512(unsigned Val) const;
 
   enum OpWidthTy {
     OPW32,
@@ -150,9 +153,11 @@ public:
 
   static MCOperand decodeIntImmed(unsigned Imm);
   static MCOperand decodeFPImmed(OpWidthTy Width, unsigned Imm);
+  MCOperand decodeMandatoryLiteralConstant(unsigned Imm) const;
   MCOperand decodeLiteralConstant() const;
 
-  MCOperand decodeSrcOp(const OpWidthTy Width, unsigned Val) const;
+  MCOperand decodeSrcOp(const OpWidthTy Width, unsigned Val,
+                        bool MandatoryLiteral = false) const;
   MCOperand decodeDstOp(const OpWidthTy Width, unsigned Val) const;
   MCOperand decodeSpecialReg32(unsigned Val) const;
   MCOperand decodeSpecialReg64(unsigned Val) const;

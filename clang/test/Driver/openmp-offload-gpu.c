@@ -8,6 +8,8 @@
 // REQUIRES: nvptx-registered-target
 // REQUIRES: amdgpu-registered-target
 
+// UNSUPPORTED: aix
+
 /// ###########################################################################
 
 /// Check -Xopenmp-target uses one of the archs provided when several archs are used.
@@ -54,7 +56,7 @@
 
 /// Use DAG to ensure that assembly file has been unbundled.
 // CHK-UNBUNDLING-PTXAS-CUBIN-NVLINK-DAG: ptxas{{.*}}" "--output-file" "[[CUBIN:.*\.cubin]]" {{.*}}"[[PTX:.*\.s]]"
-// CHK-UNBUNDLING-PTXAS-CUBIN-NVLINK-DAG: clang-offload-bundler{{.*}}" "-type=s" {{.*}}"-outputs={{.*}}[[PTX]]
+// CHK-UNBUNDLING-PTXAS-CUBIN-NVLINK-DAG: clang-offload-bundler{{.*}}" "-type=s" {{.*}}"-output={{.*}}[[PTX]]
 // CHK-UNBUNDLING-PTXAS-CUBIN-NVLINK-DAG-SAME: "-unbundle"
 // CHK-UNBUNDLING-PTXAS-CUBIN-NVLINK: nvlink{{.*}}" {{.*}}"[[CUBIN]]"
 
@@ -67,7 +69,7 @@
 
 // CHK-PTXAS-CUBIN-BUNDLING: clang{{.*}}" "-o" "[[PTX:.*\.s]]"
 // CHK-PTXAS-CUBIN-BUNDLING-NEXT: ptxas{{.*}}" "--output-file" "[[CUBIN:.*\.cubin]]" {{.*}}"[[PTX]]"
-// CHK-PTXAS-CUBIN-BUNDLING: clang-offload-bundler{{.*}}" "-type=o" {{.*}}"-inputs={{.*}}[[CUBIN]]
+// CHK-PTXAS-CUBIN-BUNDLING: clang-offload-bundler{{.*}}" "-type=o" {{.*}}"-input={{.*}}[[CUBIN]]
 
 /// ###########################################################################
 
@@ -80,7 +82,7 @@
 /// Use DAG to ensure that cubin file has been unbundled.
 // CHK-CUBIN-UNBUNDLING-NVLINK-NOT: clang-offload-bundler{{.*}}" "-type=o"{{.*}}in.so
 // CHK-CUBIN-UNBUNDLING-NVLINK-DAG: nvlink{{.*}}" {{.*}}"[[CUBIN:.*\.cubin]]"
-// CHK-CUBIN-UNBUNDLING-NVLINK-DAG: clang-offload-bundler{{.*}}" "-type=o" {{.*}}"-outputs={{.*}}[[CUBIN]]
+// CHK-CUBIN-UNBUNDLING-NVLINK-DAG: clang-offload-bundler{{.*}}" "-type=o" {{.*}}"-output={{.*}}[[CUBIN]]
 // CHK-CUBIN-UNBUNDLING-NVLINK-DAG-SAME: "-unbundle"
 // CHK-CUBIN-UNBUNDLING-NVLINK-NOT: clang-offload-bundler{{.*}}" "-type=o"{{.*}}in.so
 
@@ -148,21 +150,30 @@
 
 /// ###########################################################################
 
-/// Check that the runtime bitcode library is part of the compile line. Create a bogus
-/// bitcode library and add it to the LIBRARY_PATH.
-// RUN:   env LIBRARY_PATH=%S/Inputs/libomptarget %clang -### -fopenmp=libomp -fopenmp-targets=nvptx64-nvidia-cuda \
-// RUN:   -Xopenmp-target -march=sm_35 --cuda-path=%S/Inputs/CUDA_102/usr/local/cuda \
-// RUN:   -fopenmp-relocatable-target -save-temps -no-canonical-prefixes %s 2>&1 \
-// RUN:   | FileCheck -check-prefix=CHK-BCLIB %s
-/// The user can override default detection using --libomptarget-nvptx-bc-path=.
+/// Check that the runtime bitcode library is part of the compile line.
+/// Create a bogus bitcode library and specify it with libomptarget-nvptx-bc-path
 // RUN:   %clang -### -fopenmp=libomp -fopenmp-targets=nvptx64-nvidia-cuda \
 // RUN:   --libomptarget-nvptx-bc-path=%S/Inputs/libomptarget/libomptarget-nvptx-test.bc \
 // RUN:   -Xopenmp-target -march=sm_35 --cuda-path=%S/Inputs/CUDA_102/usr/local/cuda \
 // RUN:   -fopenmp-relocatable-target -save-temps -no-canonical-prefixes %s 2>&1 \
-// RUN:   | FileCheck -check-prefix=CHK-BCLIB-USER %s
+// RUN:   | FileCheck -check-prefix=CHK-BCLIB %s
 
-// CHK-BCLIB: clang{{.*}}-triple{{.*}}nvptx64-nvidia-cuda{{.*}}-mlink-builtin-bitcode{{.*}}libomptarget-nvptx-sm_35.bc
-// CHK-BCLIB-USER: clang{{.*}}-triple{{.*}}nvptx64-nvidia-cuda{{.*}}-mlink-builtin-bitcode{{.*}}libomptarget-nvptx-test.bc
+/// Specify the directory containing the bitcode lib, check clang picks the right one
+// RUN:   %clang -### -fopenmp=libomp -fopenmp-targets=nvptx64-nvidia-cuda \
+// RUN:   --libomptarget-nvptx-bc-path=%S/Inputs/libomptarget \
+// RUN:   -Xopenmp-target -march=sm_35 --cuda-path=%S/Inputs/CUDA_102/usr/local/cuda \
+// RUN:   -fopenmp-relocatable-target -save-temps \
+// RUN:   -no-canonical-prefixes %s 2>&1 | FileCheck -check-prefix=CHK-BCLIB-DIR %s
+
+/// Create a bogus bitcode library and find it with LIBRARY_PATH
+// RUN:   env LIBRARY_PATH=%S/Inputs/libomptarget/subdir %clang -### -fopenmp=libomp -fopenmp-targets=nvptx64-nvidia-cuda \
+// RUN:   -Xopenmp-target -march=sm_35 --cuda-path=%S/Inputs/CUDA_102/usr/local/cuda \
+// RUN:   -fopenmp-relocatable-target -save-temps \
+// RUN:   -no-canonical-prefixes %s 2>&1 | FileCheck -check-prefix=CHK-ENV-BCLIB %s
+
+// CHK-BCLIB: clang{{.*}}-triple{{.*}}nvptx64-nvidia-cuda{{.*}}-mlink-builtin-bitcode{{.*}}libomptarget-nvptx-test.bc
+// CHK-BCLIB-DIR: clang{{.*}}-triple{{.*}}nvptx64-nvidia-cuda{{.*}}-mlink-builtin-bitcode{{.*}}libomptarget{{/|\\\\}}libomptarget-nvptx-sm_35.bc
+// CHK-ENV-BCLIB: clang{{.*}}-triple{{.*}}nvptx64-nvidia-cuda{{.*}}-mlink-builtin-bitcode{{.*}}subdir{{/|\\\\}}libomptarget-nvptx-sm_35.bc
 // CHK-BCLIB-NOT: {{error:|warning:}}
 
 /// ###########################################################################
@@ -174,7 +185,7 @@
 // RUN:   -fopenmp-relocatable-target -save-temps -no-canonical-prefixes %s 2>&1 \
 // RUN:   | FileCheck -check-prefix=CHK-BCLIB-WARN %s
 
-// CHK-BCLIB-WARN: No library 'libomptarget-nvptx-sm_35.bc' found in the default clang lib directory or in LIBRARY_PATH. Please use --libomptarget-nvptx-bc-path to specify nvptx bitcode library.
+// CHK-BCLIB-WARN: no library 'libomptarget-nvptx-sm_35.bc' found in the default clang lib directory or in LIBRARY_PATH; use '--libomptarget-nvptx-bc-path' to specify nvptx bitcode library
 
 /// ###########################################################################
 
@@ -185,7 +196,7 @@
 // RUN:   -fopenmp-relocatable-target -save-temps -no-canonical-prefixes %s 2>&1 \
 // RUN:   | FileCheck -check-prefix=CHK-BCLIB-ERROR %s
 
-// CHK-BCLIB-ERROR: Bitcode library 'not-exist.bc' does not exist.
+// CHK-BCLIB-ERROR: bitcode library 'not-exist.bc' does not exist
 
 /// ###########################################################################
 
@@ -195,7 +206,7 @@
 // RUN:   -fopenmp-relocatable-target -save-temps -no-canonical-prefixes %s 2>&1 \
 // RUN:   | FileCheck -check-prefix=CHK-CUDA-VERSION-ERROR %s
 
-// CHK-CUDA-VERSION-ERROR: NVPTX target requires CUDA 9.2 or above. CUDA 9.0 is detected.
+// CHK-CUDA-VERSION-ERROR: NVPTX target requires CUDA 9.2 or above; CUDA 9.0 detected
 
 /// Check that debug info is emitted in dwarf-2
 // RUN:   %clang -### -no-canonical-prefixes -fopenmp=libomp -fopenmp-targets=nvptx64-nvidia-cuda -Xopenmp-target -march=sm_60 %s -g -O1 --no-cuda-noopt-device-debug 2>&1 \
@@ -248,7 +259,7 @@
 
 // HAS_DEBUG-NOT: warning: debug
 // HAS_DEBUG: "-triple" "nvptx64-nvidia-cuda"
-// HAS_DEBUG-SAME: "-debug-info-kind={{limited|line-tables-only}}"
+// HAS_DEBUG-SAME: "-debug-info-kind={{constructor|line-tables-only}}"
 // HAS_DEBUG-SAME: "-dwarf-version=2"
 // HAS_DEBUG-SAME: "-fopenmp-is-device"
 // HAS_DEBUG: ptxas
@@ -313,3 +324,25 @@
 // RUN:   | FileCheck -check-prefix=SAVE_TEMPS_NAMES %s
 
 // SAVE_TEMPS_NAMES-NOT: "GNU::Linker"{{.*}}["[[SAVE_TEMPS_INPUT1:.*\.o]]", "[[SAVE_TEMPS_INPUT1]]"]
+
+// RUN:   %clang -### -fopenmp=libomp -fopenmp-targets=nvptx64 -Xopenmp-target=nvptx64 -march=sm_35 \
+// RUN:          -save-temps -no-canonical-prefixes %s -o openmp-offload-gpu 2>&1 \
+// RUN:   | FileCheck -check-prefix=TRIPLE %s
+
+// TRIPLE: "-triple" "nvptx64-nvidia-cuda"
+// TRIPLE: "-target-cpu" "sm_35"
+
+// RUN:   %clang -### -fopenmp=libomp -fopenmp-targets=nvptx64-nvidia-cuda \
+// RUN:          -fopenmp-new-driver -no-canonical-prefixes -ccc-print-bindings %s -o openmp-offload-gpu 2>&1 \
+// RUN:   | FileCheck -check-prefix=NEW_DRIVER %s
+
+// NEW_DRIVER: "[[HOST_TRIPLE:.+]]" - "clang", inputs: ["[[HOST_INPUT:.+]]"], output: "[[HOST_BC:.+]]" 
+// NEW_DRIVER: "nvptx64-nvidia-cuda" - "clang", inputs: ["[[DEVICE_INPUT:.+]]", "[[HOST_BC]]"], output: "[[DEVICE_ASM:.+]]"
+// NEW_DRIVER: "nvptx64-nvidia-cuda" - "NVPTX::Assembler", inputs: ["[[DEVICE_ASM]]"], output: "[[DEVICE_OBJ:.+]]" 
+
+// RUN:   %clang -### -fopenmp=libomp -fopenmp-targets=nvptx64-nvidia-cuda -Xopenmp-target=nvptx64-nvida-cuda -march=sm_70 \
+// RUN:          --libomptarget-nvptx-bc-path=%S/Inputs/libomptarget/libomptarget-new-nvptx-test.bc \
+// RUN:          -fopenmp-new-driver -no-canonical-prefixes -nogpulib %s -o openmp-offload-gpu 2>&1 \
+// RUN:   | FileCheck -check-prefix=NEW_DRIVER_EMBEDDING %s
+
+// NEW_DRIVER_EMBEDDING: -fembed-offload-object=[[CUBIN:.*\.cubin]],openmp.nvptx64-nvidia-cuda.sm_70

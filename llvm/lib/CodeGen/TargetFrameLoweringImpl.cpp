@@ -10,18 +10,17 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "llvm/CodeGen/TargetFrameLowering.h"
 #include "llvm/ADT/BitVector.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
+#include "llvm/CodeGen/TargetFrameLowering.h"
 #include "llvm/CodeGen/TargetRegisterInfo.h"
 #include "llvm/CodeGen/TargetSubtargetInfo.h"
 #include "llvm/IR/Attributes.h"
 #include "llvm/IR/CallingConv.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/InstrTypes.h"
-#include "llvm/MC/MCRegisterInfo.h"
 #include "llvm/Support/Compiler.h"
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/Target/TargetOptions.h"
@@ -134,6 +133,16 @@ unsigned TargetFrameLowering::getStackAlignmentSkew(
     return MF.getTarget().getAllocaPointerSize();
 
   return 0;
+}
+
+bool TargetFrameLowering::allocateScavengingFrameIndexesNearIncomingSP(
+  const MachineFunction &MF) const {
+  if (!hasFP(MF))
+    return false;
+
+  const TargetRegisterInfo *RegInfo = MF.getSubtarget().getRegisterInfo();
+  return RegInfo->useFPForScavengingIndex(MF) &&
+         !RegInfo->hasStackRealignment(MF);
 }
 
 bool TargetFrameLowering::isSafeForNoCSROpt(const Function &F) {

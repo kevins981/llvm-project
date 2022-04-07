@@ -30,11 +30,7 @@ using namespace lldb_private;
 #define LLDB_OPTIONS_disassemble
 #include "CommandOptions.inc"
 
-CommandObjectDisassemble::CommandOptions::CommandOptions()
-    : Options(), num_lines_context(0), num_instructions(0), func_name(),
-      current_function(false), start_addr(), end_addr(), at_pc(false),
-      frame_line(false), plugin_name(), flavor_string(), arch(),
-      some_location_specified(false), symbol_containing_addr() {
+CommandObjectDisassemble::CommandOptions::CommandOptions() {
   OptionParsingStarting(nullptr);
 }
 
@@ -282,11 +278,20 @@ CommandObjectDisassemble::GetContainingAddressRanges() {
 
 llvm::Expected<std::vector<AddressRange>>
 CommandObjectDisassemble::GetCurrentFunctionRanges() {
+  Process *process = m_exe_ctx.GetProcessPtr();
   StackFrame *frame = m_exe_ctx.GetFramePtr();
   if (!frame) {
-    return llvm::createStringError(llvm::inconvertibleErrorCode(),
-                                   "Cannot disassemble around the current "
-                                   "function without a selected frame.\n");
+    if (process) {
+      return llvm::createStringError(
+          llvm::inconvertibleErrorCode(),
+          "Cannot disassemble around the current "
+          "function without the process being stopped.\n");
+    } else {
+      return llvm::createStringError(llvm::inconvertibleErrorCode(),
+                                     "Cannot disassemble around the current "
+                                     "function without a selected frame: "
+                                     "no currently running process.\n");
+    }
   }
   SymbolContext sc(
       frame->GetSymbolContext(eSymbolContextFunction | eSymbolContextSymbol));
@@ -305,11 +310,20 @@ CommandObjectDisassemble::GetCurrentFunctionRanges() {
 
 llvm::Expected<std::vector<AddressRange>>
 CommandObjectDisassemble::GetCurrentLineRanges() {
+  Process *process = m_exe_ctx.GetProcessPtr();
   StackFrame *frame = m_exe_ctx.GetFramePtr();
   if (!frame) {
-    return llvm::createStringError(llvm::inconvertibleErrorCode(),
-                                   "Cannot disassemble around the current "
-                                   "line without a selected frame.\n");
+    if (process) {
+      return llvm::createStringError(
+          llvm::inconvertibleErrorCode(),
+          "Cannot disassemble around the current "
+          "function without the process being stopped.\n");
+    } else {
+      return llvm::createStringError(llvm::inconvertibleErrorCode(),
+                                     "Cannot disassemble around the current "
+                                     "line without a selected frame: "
+                                     "no currently running process.\n");
+    }
   }
 
   LineEntry pc_line_entry(
@@ -325,13 +339,15 @@ CommandObjectDisassemble::GetCurrentLineRanges() {
 llvm::Expected<std::vector<AddressRange>>
 CommandObjectDisassemble::GetNameRanges(CommandReturnObject &result) {
   ConstString name(m_options.func_name.c_str());
-  const bool include_symbols = true;
-  const bool include_inlines = true;
+
+  ModuleFunctionSearchOptions function_options;
+  function_options.include_symbols = true;
+  function_options.include_inlines = true;
 
   // Find functions matching the given name.
   SymbolContextList sc_list;
-  GetSelectedTarget().GetImages().FindFunctions(
-      name, eFunctionNameTypeAuto, include_symbols, include_inlines, sc_list);
+  GetSelectedTarget().GetImages().FindFunctions(name, eFunctionNameTypeAuto,
+                                                function_options, sc_list);
 
   std::vector<AddressRange> ranges;
   llvm::Error range_errs = llvm::Error::success();
@@ -363,11 +379,20 @@ CommandObjectDisassemble::GetNameRanges(CommandReturnObject &result) {
 
 llvm::Expected<std::vector<AddressRange>>
 CommandObjectDisassemble::GetPCRanges() {
+  Process *process = m_exe_ctx.GetProcessPtr();
   StackFrame *frame = m_exe_ctx.GetFramePtr();
   if (!frame) {
-    return llvm::createStringError(llvm::inconvertibleErrorCode(),
-                                   "Cannot disassemble around the current "
-                                   "PC without a selected frame.\n");
+    if (process) {
+      return llvm::createStringError(
+          llvm::inconvertibleErrorCode(),
+          "Cannot disassemble around the current "
+          "function without the process being stopped.\n");
+    } else {
+      return llvm::createStringError(llvm::inconvertibleErrorCode(),
+                                     "Cannot disassemble around the current "
+                                     "PC without a selected frame: "
+                                     "no currently running process.\n");
+    }
   }
 
   if (m_options.num_instructions == 0) {
@@ -417,7 +442,6 @@ bool CommandObjectDisassemble::DoExecute(Args &command,
   if (!m_options.arch.IsValid()) {
     result.AppendError(
         "use the --arch option or set the target architecture to disassemble");
-    result.SetStatus(eReturnStatusFailed);
     return false;
   }
 
@@ -437,7 +461,6 @@ bool CommandObjectDisassemble::DoExecute(Args &command,
       result.AppendErrorWithFormat(
           "Unable to find Disassembler plug-in for the '%s' architecture.\n",
           m_options.arch.GetArchitectureName());
-    result.SetStatus(eReturnStatusFailed);
     return false;
   } else if (flavor_string != nullptr && !disassembler->FlavorValidForArchSpec(
                                              m_options.arch, flavor_string))
@@ -453,7 +476,6 @@ bool CommandObjectDisassemble::DoExecute(Args &command,
         GetCommandInterpreter().GetDebugger().GetTerminalWidth();
     GetOptions()->GenerateOptionUsage(result.GetErrorStream(), this,
                                       terminal_width);
-    result.SetStatus(eReturnStatusFailed);
     return false;
   }
 
@@ -478,7 +500,6 @@ bool CommandObjectDisassemble::DoExecute(Args &command,
       GetRangesForSelectedMode(result);
   if (!ranges) {
     result.AppendError(toString(ranges.takeError()));
-    result.SetStatus(eReturnStatusFailed);
     return result.Succeeded();
   }
 
@@ -508,7 +529,6 @@ bool CommandObjectDisassemble::DoExecute(Args &command,
             "Failed to disassemble memory at 0x%8.8" PRIx64 ".\n",
             cur_range.GetBaseAddress().GetLoadAddress(target));
       }
-      result.SetStatus(eReturnStatusFailed);
     }
     if (print_sc_header)
       result.GetOutputStream() << "\n";

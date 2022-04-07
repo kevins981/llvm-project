@@ -17,10 +17,11 @@ using namespace mlir;
 using namespace mlir::tblgen;
 
 Constraint::Constraint(const llvm::Record *record)
-    : def(record), kind(CK_Uncategorized) {
+    : Constraint(record, CK_Uncategorized) {
   // Look through OpVariable's to their constraint.
   if (def->isSubClassOf("OpVariable"))
     def = def->getValueAsDef("constraint");
+
   if (def->isSubClassOf("TypeConstraint")) {
     kind = CK_Type;
   } else if (def->isSubClassOf("AttrConstraint")) {
@@ -32,13 +33,6 @@ Constraint::Constraint(const llvm::Record *record)
   } else {
     assert(def->isSubClassOf("Constraint"));
   }
-}
-
-Constraint::Constraint(Kind kind, const llvm::Record *record)
-    : def(record), kind(kind) {
-  // Look through OpVariable's to their constraint.
-  if (def->isSubClassOf("OpVariable"))
-    def = def->getValueAsDef("constraint");
 }
 
 Pred Constraint::getPredicate() const {
@@ -61,6 +55,29 @@ StringRef Constraint::getSummary() const {
   if (Optional<StringRef> summary = def->getValueAsOptionalString("summary"))
     return *summary;
   return def->getName();
+}
+
+StringRef Constraint::getDefName() const {
+  // Functor used to check a base def in the case where the current def is
+  // anonymous.
+  auto checkBaseDefFn = [&](StringRef baseName) {
+    if (const auto *init = dyn_cast<llvm::DefInit>(def->getValueInit(baseName)))
+      return Constraint(init->getDef(), kind).getDefName();
+    return def->getName();
+  };
+
+  switch (kind) {
+  case CK_Attr:
+    if (def->isAnonymous())
+      return checkBaseDefFn("baseAttr");
+    return def->getName();
+  case CK_Type:
+    if (def->isAnonymous())
+      return checkBaseDefFn("baseType");
+    return def->getName();
+  default:
+    return def->getName();
+  }
 }
 
 AppliedConstraint::AppliedConstraint(Constraint &&constraint,

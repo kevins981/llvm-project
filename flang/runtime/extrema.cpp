@@ -10,10 +10,10 @@
 // and shapes and (for MAXLOC & MINLOC) result integer kinds.  Also implements
 // NORM2 using common infrastructure.
 
-#include "character.h"
 #include "reduction-templates.h"
-#include "reduction.h"
 #include "flang/Common/long-double.h"
+#include "flang/Runtime/character.h"
+#include "flang/Runtime/reduction.h"
 #include <algorithm>
 #include <cinttypes>
 #include <cmath>
@@ -176,7 +176,7 @@ inline void TypedMaxOrMinLoc(const char *intrinsic, Descriptor &result,
     break;
   default:
     terminator.Crash(
-        "%s: Bad data type code (%d) for array", intrinsic, x.type().raw());
+        "%s: bad data type code (%d) for array", intrinsic, x.type().raw());
   }
 }
 
@@ -262,7 +262,7 @@ inline void TypedPartialMaxOrMinLoc(const char *intrinsic, Descriptor &result,
     break;
   default:
     terminator.Crash(
-        "%s: Bad data type code (%d) for array", intrinsic, x.type().raw());
+        "%s: bad data type code (%d) for array", intrinsic, x.type().raw());
   }
 }
 

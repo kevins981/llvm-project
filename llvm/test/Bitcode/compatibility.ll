@@ -25,8 +25,8 @@ $comdat.exactmatch = comdat exactmatch
 ; CHECK: $comdat.exactmatch = comdat exactmatch
 $comdat.largest = comdat largest
 ; CHECK: $comdat.largest = comdat largest
-$comdat.noduplicates = comdat noduplicates
-; CHECK: $comdat.noduplicates = comdat noduplicates
+$comdat.noduplicates = comdat nodeduplicate
+; CHECK: $comdat.noduplicates = comdat nodeduplicate
 $comdat.samesize = comdat samesize
 ; CHECK: $comdat.samesize = comdat samesize
 
@@ -264,28 +264,28 @@ declare void @g.f1()
 ;                  <ResolverTy>* @<Resolver>
 
 ; IFunc -- Linkage
-@ifunc.external = external ifunc void (), i8* ()* @ifunc_resolver
-; CHECK: @ifunc.external = ifunc void (), i8* ()* @ifunc_resolver
-@ifunc.private = private ifunc void (), i8* ()* @ifunc_resolver
-; CHECK: @ifunc.private = private ifunc void (), i8* ()* @ifunc_resolver
-@ifunc.internal = internal ifunc void (), i8* ()* @ifunc_resolver
-; CHECK: @ifunc.internal = internal ifunc void (), i8* ()* @ifunc_resolver
+@ifunc.external = external ifunc void (), void ()* ()* @ifunc_resolver
+; CHECK: @ifunc.external = ifunc void (), void ()* ()* @ifunc_resolver
+@ifunc.private = private ifunc void (), void ()* ()* @ifunc_resolver
+; CHECK: @ifunc.private = private ifunc void (), void ()* ()* @ifunc_resolver
+@ifunc.internal = internal ifunc void (), void ()* ()* @ifunc_resolver
+; CHECK: @ifunc.internal = internal ifunc void (), void ()* ()* @ifunc_resolver
 
 ; IFunc -- Visibility
-@ifunc.default = default ifunc void (), i8* ()* @ifunc_resolver
-; CHECK: @ifunc.default = ifunc void (), i8* ()* @ifunc_resolver
-@ifunc.hidden = hidden ifunc void (), i8* ()* @ifunc_resolver
-; CHECK: @ifunc.hidden = hidden ifunc void (), i8* ()* @ifunc_resolver
-@ifunc.protected = protected ifunc void (), i8* ()* @ifunc_resolver
-; CHECK: @ifunc.protected = protected ifunc void (), i8* ()* @ifunc_resolver
+@ifunc.default = default ifunc void (), void ()* ()* @ifunc_resolver
+; CHECK: @ifunc.default = ifunc void (), void ()* ()* @ifunc_resolver
+@ifunc.hidden = hidden ifunc void (), void ()* ()* @ifunc_resolver
+; CHECK: @ifunc.hidden = hidden ifunc void (), void ()* ()* @ifunc_resolver
+@ifunc.protected = protected ifunc void (), void ()* ()* @ifunc_resolver
+; CHECK: @ifunc.protected = protected ifunc void (), void ()* ()* @ifunc_resolver
 
 ; IFunc -- partition
-; CHECK: @ifunc.partition = ifunc void (), i8* ()* @ifunc_resolver, partition "part"
-@ifunc.partition = ifunc void (), i8* ()* @ifunc_resolver, partition "part"
+; CHECK: @ifunc.partition = ifunc void (), void ()* ()* @ifunc_resolver, partition "part"
+@ifunc.partition = ifunc void (), void ()* ()* @ifunc_resolver, partition "part"
 
-define i8* @ifunc_resolver() {
+define void ()* @ifunc_resolver() {
 entry:
-  ret i8* null
+  ret void ()* null
 }
 
 ;; Functions
@@ -560,6 +560,8 @@ declare void @f.param.swiftasync(i8* swiftasync)
 ; CHECK: declare void @f.param.swiftasync(i8* swiftasync)
 declare void @f.param.swifterror(i8** swifterror)
 ; CHECK: declare void @f.param.swifterror(i8** swifterror)
+declare void @f.param.allocalign(i32 allocalign)
+; CHECK: declare void @f.param.allocalign(i32 allocalign)
 
 ; Functions -- unnamed_addr and local_unnamed_addr
 declare void @f.unnamed_addr() unnamed_addr
@@ -1510,7 +1512,7 @@ exit:
   ; CHECK: select <2 x i1> <i1 true, i1 false>, <2 x i8> <i8 2, i8 3>, <2 x i8> <i8 3, i8 2>
 
   call void @f.nobuiltin() builtin
-  ; CHECK: call void @f.nobuiltin() #44
+  ; CHECK: call void @f.nobuiltin() #49
 
   call fastcc noalias i32* @f.noalias() noinline
   ; CHECK: call fastcc noalias i32* @f.noalias() #12
@@ -1904,6 +1906,12 @@ define void @instructions.strictfp() strictfp {
   ret void
 }
 
+declare void @f.nosanitize_coverage() nosanitize_coverage
+; CHECK: declare void @f.nosanitize_coverage() #44
+
+declare void @f.disable_sanitizer_instrumentation() disable_sanitizer_instrumentation
+; CHECK: declare void @f.disable_sanitizer_instrumentation() #45
+
 ; immarg attribute
 declare void @llvm.test.immarg.intrinsic(i32 immarg)
 ; CHECK: declare void @llvm.test.immarg.intrinsic(i32 immarg)
@@ -1916,6 +1924,16 @@ declare void @byval_named_type(%named_type* byval(%named_type))
 ; CHECK: declare void @byval_type(i32* byval(i32) align 2)
 ; CHECK: declare void @byval_type2({ i8, i8* }* byval({ i8, i8* }))
 ; CHECK: declare void @byval_named_type([8 x i8]* byval([8 x i8]))
+
+declare void @f.allocsize_one(i32) allocsize(0)
+declare void @f.allocsize_two(i32, i32) allocsize(1, 0)
+; CHECK: Function Attrs: allocsize(0)
+; CHECK: declare void @f.allocsize_one(i32)
+; CHECK: Function Attrs: allocsize(1,0)
+; CHECK: declare void @f.allocsize_two(i32, i32)
+
+declare void @f.nosanitize_bounds() nosanitize_bounds
+; CHECK: declare void @f.nosanitize_bounds() #48
 
 ; CHECK: attributes #0 = { alignstack=4 }
 ; CHECK: attributes #1 = { alignstack=8 }
@@ -1952,16 +1970,21 @@ declare void @byval_named_type(%named_type* byval(%named_type))
 ; CHECK: attributes #32 = { norecurse }
 ; CHECK: attributes #33 = { inaccessiblememonly }
 ; CHECK: attributes #34 = { inaccessiblemem_or_argmemonly }
-; CHECK: attributes #35 = { nofree nosync nounwind readnone willreturn }
-; CHECK: attributes #36 = { nofree nosync nounwind willreturn }
+; CHECK: attributes #35 = { nocallback nofree nosync nounwind readnone willreturn }
+; CHECK: attributes #36 = { nocallback nofree nosync nounwind willreturn }
 ; CHECK: attributes #37 = { argmemonly nounwind readonly }
 ; CHECK: attributes #38 = { argmemonly nounwind }
 ; CHECK: attributes #39 = { nounwind readonly }
-; CHECK: attributes #40 = { inaccessiblemem_or_argmemonly nofree nosync nounwind willreturn }
+; CHECK: attributes #40 = { inaccessiblemem_or_argmemonly nocallback nofree nosync nounwind willreturn }
 ; CHECK: attributes #41 = { writeonly }
 ; CHECK: attributes #42 = { speculatable }
 ; CHECK: attributes #43 = { strictfp }
-; CHECK: attributes #44 = { builtin }
+; CHECK: attributes #44 = { nosanitize_coverage }
+; CHECK: attributes #45 = { disable_sanitizer_instrumentation }
+; CHECK: attributes #46 = { allocsize(0) }
+; CHECK: attributes #47 = { allocsize(1,0) }
+; CHECK: attributes #48 = { nosanitize_bounds }
+; CHECK: attributes #49 = { builtin }
 
 ;; Metadata
 

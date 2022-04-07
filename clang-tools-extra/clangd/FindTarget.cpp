@@ -31,15 +31,17 @@
 #include "clang/AST/TypeLocVisitor.h"
 #include "clang/AST/TypeVisitor.h"
 #include "clang/Basic/LangOptions.h"
-#include "clang/Basic/OperatorKinds.h"
 #include "clang/Basic/SourceLocation.h"
+#include "clang/Basic/SourceManager.h"
 #include "clang/Basic/Specifiers.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/StringExtras.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/Compiler.h"
 #include "llvm/Support/raw_ostream.h"
 #include <iterator>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -92,6 +94,16 @@ const NamedDecl *getTemplatePattern(const NamedDecl *D) {
     }
   }
   return nullptr;
+}
+
+// Returns true if the `TypedefNameDecl` should not be reported.
+bool shouldSkipTypedef(const TypedefNameDecl *TD) {
+  // These should be treated as keywords rather than decls - the typedef is an
+  // odd implementation detail.
+  if (TD == TD->getASTContext().getObjCInstanceTypeDecl() ||
+      TD == TD->getASTContext().getObjCIdDecl())
+    return true;
+  return false;
 }
 
 // TargetFinder locates the entities that an AST node refers to.
@@ -181,6 +193,9 @@ public:
       for (const UsingShadowDecl *S : UD->shadows())
         add(S->getUnderlyingDecl(), Flags);
       Flags |= Rel::Alias; // continue with the alias.
+    } else if (const UsingEnumDecl *UED = dyn_cast<UsingEnumDecl>(D)) {
+      add(UED->getEnumDecl(), Flags);
+      Flags |= Rel::Alias; // continue with the alias.
     } else if (const auto *NAD = dyn_cast<NamespaceAliasDecl>(D)) {
       add(NAD->getUnderlyingDecl(), Flags | Rel::Underlying);
       Flags |= Rel::Alias; // continue with the alias
@@ -193,9 +208,9 @@ public:
       }
       Flags |= Rel::Alias; // continue with the alias
     } else if (const UsingShadowDecl *USD = dyn_cast<UsingShadowDecl>(D)) {
-      // Include the using decl, but don't traverse it. This may end up
+      // Include the Introducing decl, but don't traverse it. This may end up
       // including *all* shadows, which we don't want.
-      report(USD->getUsingDecl(), Flags | Rel::Alias);
+      report(USD->getIntroducer(), Flags | Rel::Alias);
       // Shadow decls are synthetic and not themselves interesting.
       // Record the underlying decl instead, if allowed.
       D = USD->getTargetDecl();
@@ -306,9 +321,6 @@ public:
         Outer.add(OME->getMethodDecl(), Flags);
       }
       void VisitObjCPropertyRefExpr(const ObjCPropertyRefExpr *OPRE) {
-        // FIXME: We miss visiting the class receiver if one exists, which
-        // means we skip the corresponding ObjCInterfaceDecl ref since it
-        // doesn't have a corresponding node.
         if (OPRE->isExplicitProperty())
           Outer.add(OPRE->getExplicitProperty(), Flags);
         else {
@@ -354,6 +366,10 @@ public:
         Outer.add(ET->desugar(), Flags);
       }
 
+      void VisitUsingType(const UsingType *ET) {
+        Outer.add(ET->getFoundDecl(), Flags);
+      }
+
       void VisitInjectedClassNameType(const InjectedClassNameType *ICNT) {
         Outer.add(ICNT->getDecl(), Flags);
       }
@@ -364,7 +380,7 @@ public:
       void VisitDeducedType(const DeducedType *DT) {
         // FIXME: In practice this doesn't work: the AutoType you find inside
         // TypeLoc never has a deduced type. https://llvm.org/PR42914
-        Outer.add(DT->getDeducedType(), Flags | Rel::Underlying);
+        Outer.add(DT->getDeducedType(), Flags);
       }
       void VisitDeducedTemplateSpecializationType(
           const DeducedTemplateSpecializationType *DTST) {
@@ -395,6 +411,8 @@ public:
         }
       }
       void VisitTypedefType(const TypedefType *TT) {
+        if (shouldSkipTypedef(TT->getDecl()))
+          return;
         Outer.add(TT->getDecl(), Flags);
       }
       void
@@ -433,15 +451,6 @@ public:
       }
       void VisitObjCInterfaceType(const ObjCInterfaceType *OIT) {
         Outer.add(OIT->getDecl(), Flags);
-      }
-      void VisitObjCObjectType(const ObjCObjectType *OOT) {
-        // Make all of the protocols targets since there's no child nodes for
-        // protocols. This isn't needed for the base type, which *does* have a
-        // child `ObjCInterfaceTypeLoc`. This structure is a hack, but it works
-        // well for go-to-definition.
-        unsigned NumProtocols = OOT->getNumProtocols();
-        for (unsigned I = 0; I < NumProtocols; I++)
-          Outer.add(OOT->getProtocol(I), Flags);
       }
     };
     Visitor(*this, Flags).Visit(T.getTypePtr());
@@ -495,7 +504,8 @@ public:
     // DeclRefExpr).
     if (Arg.getKind() == TemplateArgument::Template ||
         Arg.getKind() == TemplateArgument::TemplateExpansion) {
-      if (TemplateDecl *TD = Arg.getAsTemplate().getAsTemplateDecl()) {
+      if (TemplateDecl *TD =
+              Arg.getAsTemplateOrTemplatePattern().getAsTemplateDecl()) {
         report(TD, Flags);
       }
     }
@@ -527,6 +537,8 @@ allTargetDecls(const DynTypedNode &N, const HeuristicResolver *Resolver) {
     Finder.add(TAL->getArgument(), Flags);
   else if (const CXXBaseSpecifier *CBS = N.get<CXXBaseSpecifier>())
     Finder.add(CBS->getTypeSourceInfo()->getType(), Flags);
+  else if (const ObjCProtocolLoc *PL = N.get<ObjCProtocolLoc>())
+    Finder.add(PL->getProtocol(), Flags);
   return Finder.takeDecls();
 }
 
@@ -649,25 +661,7 @@ llvm::SmallVector<ReferenceLoc> refInDecl(const Decl *D,
                                   {OMD}});
     }
 
-    void visitProtocolList(
-        llvm::iterator_range<ObjCProtocolList::iterator> Protocols,
-        llvm::iterator_range<const SourceLocation *> Locations) {
-      for (const auto &P : llvm::zip(Protocols, Locations)) {
-        Refs.push_back(ReferenceLoc{NestedNameSpecifierLoc(),
-                                    std::get<1>(P),
-                                    /*IsDecl=*/false,
-                                    {std::get<0>(P)}});
-      }
-    }
-
-    void VisitObjCInterfaceDecl(const ObjCInterfaceDecl *OID) {
-      if (OID->isThisDeclarationADefinition())
-        visitProtocolList(OID->protocols(), OID->protocol_locs());
-      Base::VisitObjCInterfaceDecl(OID); // Visit the interface's name.
-    }
-
     void VisitObjCCategoryDecl(const ObjCCategoryDecl *OCD) {
-      visitProtocolList(OCD->protocols(), OCD->protocol_locs());
       // getLocation is the extended class's location, not the category's.
       Refs.push_back(ReferenceLoc{NestedNameSpecifierLoc(),
                                   OCD->getLocation(),
@@ -688,12 +682,6 @@ llvm::SmallVector<ReferenceLoc> refInDecl(const Decl *D,
                                   OCID->getCategoryNameLoc(),
                                   /*IsDecl=*/true,
                                   {OCID->getCategoryDecl()}});
-    }
-
-    void VisitObjCProtocolDecl(const ObjCProtocolDecl *OPD) {
-      if (OPD->isThisDeclarationADefinition())
-        visitProtocolList(OPD->protocols(), OPD->protocol_locs());
-      Base::VisitObjCProtocolDecl(OPD); // Visit the protocol's name.
     }
   };
 
@@ -766,13 +754,6 @@ llvm::SmallVector<ReferenceLoc> refInStmt(const Stmt *S,
     }
 
     void VisitObjCPropertyRefExpr(const ObjCPropertyRefExpr *E) {
-      // There's no contained TypeLoc node for a class receiver type.
-      if (E->isClassReceiver()) {
-        Refs.push_back(ReferenceLoc{NestedNameSpecifierLoc(),
-                                    E->getReceiverLocation(),
-                                    /*IsDecl=*/false,
-                                    {E->getClassReceiver()}});
-      }
       Refs.push_back(ReferenceLoc{
           NestedNameSpecifierLoc(), E->getLocation(),
           /*IsDecl=*/false,
@@ -849,6 +830,13 @@ refInTypeLoc(TypeLoc L, const HeuristicResolver *Resolver) {
       }
     }
 
+    void VisitUsingTypeLoc(UsingTypeLoc L) {
+      Refs.push_back(ReferenceLoc{NestedNameSpecifierLoc(),
+                                  L.getLocalSourceRange().getBegin(),
+                                  /*IsDecl=*/false,
+                                  {L.getFoundDecl()}});
+    }
+
     void VisitTagTypeLoc(TagTypeLoc L) {
       Refs.push_back(ReferenceLoc{NestedNameSpecifierLoc(),
                                   L.getNameLoc(),
@@ -910,6 +898,8 @@ refInTypeLoc(TypeLoc L, const HeuristicResolver *Resolver) {
     }
 
     void VisitTypedefTypeLoc(TypedefTypeLoc L) {
+      if (shouldSkipTypedef(L.getTypedefNameDecl()))
+        return;
       Refs.push_back(ReferenceLoc{NestedNameSpecifierLoc(),
                                   L.getNameLoc(),
                                   /*IsDecl=*/false,
@@ -921,16 +911,6 @@ refInTypeLoc(TypeLoc L, const HeuristicResolver *Resolver) {
                                   L.getNameLoc(),
                                   /*IsDecl=*/false,
                                   {L.getIFaceDecl()}});
-    }
-
-    void VisitObjCObjectTypeLoc(ObjCObjectTypeLoc L) {
-      unsigned NumProtocols = L.getNumProtocols();
-      for (unsigned I = 0; I < NumProtocols; I++) {
-        Refs.push_back(ReferenceLoc{NestedNameSpecifierLoc(),
-                                    L.getProtocolLoc(I),
-                                    /*IsDecl=*/false,
-                                    {L.getProtocol(I)}});
-      }
     }
   };
 
@@ -1027,6 +1007,11 @@ public:
     return RecursiveASTVisitor::TraverseNestedNameSpecifierLoc(L);
   }
 
+  bool TraverseObjCProtocolLoc(ObjCProtocolLoc ProtocolLoc) {
+    visitNode(DynTypedNode::create(ProtocolLoc));
+    return true;
+  }
+
   bool TraverseConstructorInitializer(CXXCtorInitializer *Init) {
     visitNode(DynTypedNode::create(*Init));
     return RecursiveASTVisitor::TraverseConstructorInitializer(Init);
@@ -1072,6 +1057,12 @@ private:
                              {CCI->getAnyMember()}}};
       }
     }
+    if (const ObjCProtocolLoc *PL = N.get<ObjCProtocolLoc>())
+      return {ReferenceLoc{NestedNameSpecifierLoc(),
+                           PL->getLocation(),
+                           /*IsDecl=*/false,
+                           {PL->getProtocol()}}};
+
     // We do not have location information for other nodes (QualType, etc)
     return {};
   }
@@ -1150,14 +1141,13 @@ llvm::raw_ostream &operator<<(llvm::raw_ostream &OS, DeclRelationSet RS) {
 llvm::raw_ostream &operator<<(llvm::raw_ostream &OS, ReferenceLoc R) {
   // note we cannot print R.NameLoc without a source manager.
   OS << "targets = {";
-  bool First = true;
+  llvm::SmallVector<std::string> Targets;
   for (const NamedDecl *T : R.Targets) {
-    if (!First)
-      OS << ", ";
-    else
-      First = false;
-    OS << printQualifiedName(*T) << printTemplateSpecializationArgs(*T);
+    llvm::raw_string_ostream Target(Targets.emplace_back());
+    Target << printQualifiedName(*T) << printTemplateSpecializationArgs(*T);
   }
+  llvm::sort(Targets);
+  OS << llvm::join(Targets, ", ");
   OS << "}";
   if (R.Qualifier) {
     OS << ", qualifier = '";

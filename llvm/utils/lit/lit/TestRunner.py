@@ -6,6 +6,7 @@ import getopt
 import os, signal, subprocess, sys
 import re
 import stat
+import pathlib
 import platform
 import shutil
 import tempfile
@@ -209,7 +210,7 @@ def quote_windows_command(seq):
             result.append(' ')
 
         # This logic differs from upstream list2cmdline.
-        needquote = (" " in arg) or ("\t" in arg) or ("\"" in arg) or ("[" in arg) or not arg
+        needquote = (" " in arg) or ("\t" in arg) or ("\"" in arg) or ("[" in arg) or (";" in arg) or not arg
         if needquote:
             result.append('"')
 
@@ -783,7 +784,9 @@ def _executeShCmd(cmd, shenv, results, timeoutHelper):
                                           stdout = stdout,
                                           stderr = stderr,
                                           env = cmd_shenv.env,
-                                          close_fds = kUseCloseFDs))
+                                          close_fds = kUseCloseFDs,
+                                          universal_newlines = True,
+                                          errors = 'replace'))
             proc_not_counts.append(not_count)
             # Let the helper know about this process
             timeoutHelper.addProcess(procs[-1])
@@ -1118,6 +1121,12 @@ def getDefaultSubstitutions(test, tmpDir, tmpBase, normalize_slashes=False):
                           ('%t', tmpName),
                           ('%basename_t', baseName),
                           ('%T', tmpDir)])
+
+    substitutions.extend([
+        ('%{fs-src-root}', pathlib.Path(sourcedir).anchor),
+        ('%{fs-tmp-root}', pathlib.Path(tmpBase).anchor),
+        ('%{fs-sep}', os.path.sep),
+    ])
 
     # "%/[STpst]" should be normalized.
     substitutions.extend([

@@ -32,7 +32,8 @@ if(NOT ANDROID)
     # Use LLVM utils and Clang from the same build tree.
     list(APPEND SANITIZER_COMMON_LIT_TEST_DEPS
       clang clang-resource-headers FileCheck count not llvm-config llvm-nm llvm-objdump
-      llvm-readelf llvm-readobj llvm-size llvm-symbolizer compiler-rt-headers sancov)
+      llvm-readelf llvm-readobj llvm-size llvm-symbolizer compiler-rt-headers sancov
+      llvm-jitlink)
     if (WIN32)
       list(APPEND SANITIZER_COMMON_LIT_TEST_DEPS KillTheDoctor)
     endif()
@@ -91,7 +92,7 @@ if(COMPILER_RT_CAN_EXECUTE_TESTS)
   if(COMPILER_RT_BUILD_ORC)
     compiler_rt_Test_runtime(orc)
   endif()
-  if(COMPILER_RT_BUILD_CRT AND COMPILER_RT_HAS_CRT)
+  if(COMPILER_RT_BUILD_CRT)
     add_subdirectory(crt)
   endif()
   # ShadowCallStack does not yet provide a runtime with compiler-rt, the tests

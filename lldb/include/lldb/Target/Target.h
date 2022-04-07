@@ -21,6 +21,7 @@
 #include "lldb/Core/Architecture.h"
 #include "lldb/Core/Disassembler.h"
 #include "lldb/Core/ModuleList.h"
+#include "lldb/Core/StructuredDataImpl.h"
 #include "lldb/Core/UserSettingsController.h"
 #include "lldb/Expression/Expression.h"
 #include "lldb/Host/ProcessLaunchInfo.h"
@@ -28,6 +29,7 @@
 #include "lldb/Target/ExecutionContextScope.h"
 #include "lldb/Target/PathMappingList.h"
 #include "lldb/Target/SectionLoadHistory.h"
+#include "lldb/Target/Statistics.h"
 #include "lldb/Target/ThreadSpec.h"
 #include "lldb/Utility/ArchSpec.h"
 #include "lldb/Utility/Broadcaster.h"
@@ -36,8 +38,6 @@
 #include "lldb/lldb-public.h"
 
 namespace lldb_private {
-
-class ClangModulesDeclVendor;
 
 OptionEnumValues GetDynamicValueTypes();
 
@@ -124,7 +124,16 @@ public:
 
   void SetRunArguments(const Args &args);
 
+  // Get the whole environment including the platform inherited environment and
+  // the target specific environment, excluding the unset environment variables.
   Environment GetEnvironment() const;
+  // Get the platform inherited environment, excluding the unset environment
+  // variables.
+  Environment GetInheritedEnvironment() const;
+  // Get the target specific environment only, without the platform inherited
+  // environment.
+  Environment GetTargetEnvironment() const;
+  // Set the target specific environment.
   void SetEnvironment(Environment env);
 
   bool GetSkipPrologue() const;
@@ -149,8 +158,8 @@ public:
 
   bool GetEnableNotifyAboutFixIts() const;
 
-  bool GetEnableSaveObjects() const;
-
+  FileSpec GetSaveJITObjectsDir() const;
+  
   bool GetEnableSyntheticValue() const;
 
   uint32_t GetMaxZeroPaddingInFloatFormat() const;
@@ -199,10 +208,6 @@ public:
 
   void SetUserSpecifiedTrapHandlerNames(const Args &args);
 
-  bool GetNonStopModeEnabled() const;
-
-  void SetNonStopModeEnabled(bool b);
-
   bool GetDisplayRuntimeSupportValues() const;
 
   void SetDisplayRuntimeSupportValues(bool b);
@@ -243,6 +248,9 @@ private:
   void DisableASLRValueChangedCallback();
   void InheritTCCValueChangedCallback();
   void DisableSTDIOValueChangedCallback();
+  
+  // Settings checker for target.jit-save-objects-dir:
+  void CheckJITObjectsDir();
 
   Environment ComputeEnvironment() const;
 
@@ -440,7 +448,7 @@ private:
   // #line %u "%s" before the expression content to remap where the source
   // originates
   mutable std::string m_pound_line_file;
-  mutable uint32_t m_pound_line_line;
+  mutable uint32_t m_pound_line_line = 0;
 };
 
 // Target
@@ -559,7 +567,7 @@ public:
 
   // Settings accessors
 
-  static const lldb::TargetPropertiesSP &GetGlobalProperties();
+  static TargetProperties &GetGlobalProperties();
 
   std::recursive_mutex &GetAPIMutex();
 
@@ -961,6 +969,9 @@ public:
   ModuleIsExcludedForUnconstrainedSearches(const lldb::ModuleSP &module_sp);
 
   const ArchSpec &GetArchitecture() const { return m_arch.GetSpec(); }
+  
+  /// Returns the name of the target's ABI plugin.
+  llvm::StringRef GetABIName() const;
 
   /// Set the architecture for this target.
   ///
@@ -986,7 +997,7 @@ public:
   ///     manually set following this function call).
   ///
   /// \return
-  ///     \b true if the architecture was successfully set, \bfalse otherwise.
+  ///     \b true if the architecture was successfully set, \b false otherwise.
   bool SetArchitecture(const ArchSpec &arch_spec, bool set_platform = false);
 
   bool MergeArchitecture(const ArchSpec &arch_spec);
@@ -1014,10 +1025,42 @@ public:
                     lldb::addr_t *load_addr_ptr = nullptr);
 
   size_t ReadCStringFromMemory(const Address &addr, std::string &out_str,
-                               Status &error);
+                               Status &error, bool force_live_memory = false);
 
   size_t ReadCStringFromMemory(const Address &addr, char *dst,
-                               size_t dst_max_len, Status &result_error);
+                               size_t dst_max_len, Status &result_error,
+                               bool force_live_memory = false);
+
+  /// Read a NULL terminated string from memory
+  ///
+  /// This function will read a cache page at a time until a NULL string
+  /// terminator is found. It will stop reading if an aligned sequence of NULL
+  /// termination \a type_width bytes is not found before reading \a
+  /// cstr_max_len bytes.  The results are always guaranteed to be NULL
+  /// terminated, and that no more than (max_bytes - type_width) bytes will be
+  /// read.
+  ///
+  /// \param[in] addr
+  ///     The address to start the memory read.
+  ///
+  /// \param[in] dst
+  ///     A character buffer containing at least max_bytes.
+  ///
+  /// \param[in] max_bytes
+  ///     The maximum number of bytes to read.
+  ///
+  /// \param[in] error
+  ///     The error status of the read operation.
+  ///
+  /// \param[in] type_width
+  ///     The size of the null terminator (1 to 4 bytes per
+  ///     character).  Defaults to 1.
+  ///
+  /// \return
+  ///     The error status or the number of bytes prior to the null terminator.
+  size_t ReadStringFromMemory(const Address &addr, char *dst, size_t max_bytes,
+                              Status &error, size_t type_width,
+                              bool force_live_memory = true);
 
   size_t ReadScalarIntegerFromMemory(const Address &addr, uint32_t byte_size,
                                      bool is_signed, Scalar &scalar,
@@ -1128,12 +1171,19 @@ public:
   ///
   /// \return
   ///   The trace object. It might be undefined.
-  lldb::TraceSP &GetTrace();
+  lldb::TraceSP GetTrace();
 
-  /// Similar to \a GetTrace, but this also tries to create a \a Trace object
-  /// if not available using the default supported tracing technology for
-  /// this process.
-  llvm::Expected<lldb::TraceSP &> GetTraceOrCreate();
+  /// Create a \a Trace object for the current target using the using the
+  /// default supported tracing technology for this process.
+  ///
+  /// \return
+  ///     The new \a Trace or an \a llvm::Error if a \a Trace already exists or
+  ///     the trace couldn't be created.
+  llvm::Expected<lldb::TraceSP> CreateTrace();
+
+  /// If a \a Trace object is present, this returns it, otherwise a new Trace is
+  /// created with \a Trace::CreateTrace.
+  llvm::Expected<lldb::TraceSP> GetTraceOrCreate();
 
   // Since expressions results can persist beyond the lifetime of a process,
   // and the const expression results are available after a process is gone, we
@@ -1267,8 +1317,7 @@ public:
     std::string m_class_name;
     /// This holds the dictionary of keys & values that can be used to
     /// parametrize any given callback's behavior.
-    StructuredDataImpl *m_extra_args; // We own this structured data,
-                                      // but the SD itself manages the UP.
+    StructuredDataImpl m_extra_args;
     /// This holds the python callback object.
     StructuredData::GenericSP m_implementation_sp;
 
@@ -1335,8 +1384,6 @@ public:
   }
 
   SourceManager &GetSourceManager();
-
-  ClangModulesDeclVendor *GetClangModulesDeclVendor();
 
   // Methods.
   lldb::SearchFilterSP
@@ -1421,15 +1468,15 @@ protected:
   typedef std::map<lldb::LanguageType, lldb::REPLSP> REPLMap;
   REPLMap m_repl_map;
 
-  std::unique_ptr<ClangModulesDeclVendor> m_clang_modules_decl_vendor_up;
-
   lldb::SourceManagerUP m_source_manager_up;
 
   typedef std::map<lldb::user_id_t, StopHookSP> StopHookCollection;
   StopHookCollection m_stop_hooks;
   lldb::user_id_t m_stop_hook_next_id;
+  uint32_t m_latest_stop_hook_id; /// This records the last natural stop at
+                                  /// which we ran a stop-hook.
   bool m_valid;
-  bool m_suppress_stop_hooks;
+  bool m_suppress_stop_hooks; /// Used to not run stop hooks for expressions
   bool m_is_dummy_target;
   unsigned m_next_persistent_variable_index = 0;
   /// An optional \a lldb_private::Trace object containing processor trace
@@ -1443,23 +1490,22 @@ protected:
 
   // Utilities for `statistics` command.
 private:
-  std::vector<uint32_t> m_stats_storage;
-  bool m_collecting_stats = false;
+  // Target metrics storage.
+  TargetStats m_stats;
 
 public:
-  void SetCollectingStats(bool v) { m_collecting_stats = v; }
+  /// Get metrics associated with this target in JSON format.
+  ///
+  /// Target metrics help measure timings and information that is contained in
+  /// a target. These are designed to help measure performance of a debug
+  /// session as well as represent the current state of the target, like
+  /// information on the currently modules, currently set breakpoints and more.
+  ///
+  /// \return
+  ///     Returns a JSON value that contains all target metrics.
+  llvm::json::Value ReportStatistics();
 
-  bool GetCollectingStats() { return m_collecting_stats; }
-
-  void IncrementStats(lldb_private::StatisticKind key) {
-    if (!GetCollectingStats())
-      return;
-    lldbassert(key < lldb_private::StatisticKind::StatisticMax &&
-               "invalid statistics!");
-    m_stats_storage[key] += 1;
-  }
-
-  std::vector<uint32_t> GetStatistics() { return m_stats_storage; }
+  TargetStats &GetStatistics() { return m_stats; }
 
 private:
   /// Construct with optional file and arch.
@@ -1481,6 +1527,10 @@ private:
   void AddBreakpoint(lldb::BreakpointSP breakpoint_sp, bool internal);
 
   void FinalizeFileActions(ProcessLaunchInfo &info);
+
+  /// Return a recommended size for memory reads at \a addr, optimizing for
+  /// cache usage.
+  lldb::addr_t GetReasonableReadSize(const Address &addr);
 
   Target(const Target &) = delete;
   const Target &operator=(const Target &) = delete;

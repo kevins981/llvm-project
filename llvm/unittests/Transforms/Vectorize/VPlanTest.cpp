@@ -707,16 +707,16 @@ edge [fontname=Courier, fontsize=30]
 compound=true
   N0 [label =
     "bb1:\l" +
-    "  EMIT vp\<%0\> = add\l" +
-    "  EMIT vp\<%1\> = sub vp\<%0\>\l" +
-    "  EMIT br vp\<%0\> vp\<%1\>\l" +
+    "  EMIT vp\<%1\> = add\l" +
+    "  EMIT vp\<%2\> = sub vp\<%1\>\l" +
+    "  EMIT br vp\<%1\> vp\<%2\>\l" +
     "Successor(s): bb2\l"
   ]
   N0 -> N1 [ label=""]
   N1 [label =
     "bb2:\l" +
-    "  EMIT vp\<%3\> = mul vp\<%1\> vp\<%0\>\l" +
-    "  EMIT ret vp\<%3\>\l" +
+    "  EMIT vp\<%4\> = mul vp\<%2\> vp\<%1\>\l" +
+    "  EMIT ret vp\<%4\>\l" +
     "No successors\l"
   ]
 }
@@ -724,9 +724,9 @@ compound=true
   EXPECT_EQ(ExpectedStr, FullDump);
 
   const char *ExpectedBlock1Str = R"(bb1:
-  EMIT vp<%0> = add
-  EMIT vp<%1> = sub vp<%0>
-  EMIT br vp<%0> vp<%1>
+  EMIT vp<%1> = add
+  EMIT vp<%2> = sub vp<%1>
+  EMIT br vp<%1> vp<%2>
 Successor(s): bb2
 )";
   std::string Block1Dump;
@@ -736,8 +736,8 @@ Successor(s): bb2
 
   // Ensure that numbering is good when dumping the second block in isolation.
   const char *ExpectedBlock2Str = R"(bb2:
-  EMIT vp<%3> = mul vp<%1> vp<%0>
-  EMIT ret vp<%3>
+  EMIT vp<%4> = mul vp<%2> vp<%1>
+  EMIT ret vp<%4>
 No successors
 )";
   std::string Block2Dump;
@@ -751,7 +751,7 @@ No successors
     VPSlotTracker SlotTracker(&Plan);
     I3->print(OS, "", SlotTracker);
     OS.flush();
-    EXPECT_EQ("EMIT br vp<%0> vp<%1>", I3Dump);
+    EXPECT_EQ("EMIT br vp<%1> vp<%2>", I3Dump);
   }
 
   {
@@ -759,7 +759,7 @@ No successors
     raw_string_ostream OS(I4Dump);
     OS << *I4;
     OS.flush();
-    EXPECT_EQ("EMIT vp<%3> = mul vp<%1> vp<%0>", I4Dump);
+    EXPECT_EQ("EMIT vp<%4> = mul vp<%2> vp<%1>", I4Dump);
   }
 }
 #endif
@@ -936,7 +936,7 @@ TEST(VPRecipeTest, CastVPWidenMemoryInstructionRecipeToVPUserAndVPDef) {
       new LoadInst(Int32, UndefValue::get(Int32Ptr), "", false, Align(1));
   VPValue Addr;
   VPValue Mask;
-  VPWidenMemoryInstructionRecipe Recipe(*Load, &Addr, &Mask);
+  VPWidenMemoryInstructionRecipe Recipe(*Load, &Addr, &Mask, true, false);
   EXPECT_TRUE(isa<VPUser>(&Recipe));
   VPRecipeBase *BaseR = &Recipe;
   EXPECT_TRUE(isa<VPUser>(BaseR));
@@ -949,7 +949,7 @@ TEST(VPRecipeTest, CastVPWidenMemoryInstructionRecipeToVPUserAndVPDef) {
   delete Load;
 }
 
-TEST(VPRecipeTest, MayHaveSideEffects) {
+TEST(VPRecipeTest, MayHaveSideEffectsAndMayReadWriteMemory) {
   LLVMContext C;
   IntegerType *Int1 = IntegerType::get(C, 1);
   IntegerType *Int32 = IntegerType::get(C, 32);
@@ -965,7 +965,9 @@ TEST(VPRecipeTest, MayHaveSideEffects) {
     Args.push_back(&Op1);
     VPWidenRecipe Recipe(*AI, make_range(Args.begin(), Args.end()));
     EXPECT_FALSE(Recipe.mayHaveSideEffects());
-
+    EXPECT_FALSE(Recipe.mayReadFromMemory());
+    EXPECT_FALSE(Recipe.mayWriteToMemory());
+    EXPECT_FALSE(Recipe.mayReadOrWriteMemory());
     delete AI;
   }
 
@@ -982,6 +984,9 @@ TEST(VPRecipeTest, MayHaveSideEffects) {
     VPWidenSelectRecipe Recipe(*SelectI, make_range(Args.begin(), Args.end()),
                                false);
     EXPECT_FALSE(Recipe.mayHaveSideEffects());
+    EXPECT_FALSE(Recipe.mayReadFromMemory());
+    EXPECT_FALSE(Recipe.mayWriteToMemory());
+    EXPECT_FALSE(Recipe.mayReadOrWriteMemory());
     delete SelectI;
   }
 
@@ -995,6 +1000,9 @@ TEST(VPRecipeTest, MayHaveSideEffects) {
     Args.push_back(&Op2);
     VPWidenGEPRecipe Recipe(GEP, make_range(Args.begin(), Args.end()));
     EXPECT_FALSE(Recipe.mayHaveSideEffects());
+    EXPECT_FALSE(Recipe.mayReadFromMemory());
+    EXPECT_FALSE(Recipe.mayWriteToMemory());
+    EXPECT_FALSE(Recipe.mayReadOrWriteMemory());
     delete GEP;
   }
 
@@ -1002,6 +1010,9 @@ TEST(VPRecipeTest, MayHaveSideEffects) {
     VPValue Mask;
     VPBranchOnMaskRecipe Recipe(&Mask);
     EXPECT_FALSE(Recipe.mayHaveSideEffects());
+    EXPECT_FALSE(Recipe.mayReadFromMemory());
+    EXPECT_FALSE(Recipe.mayWriteToMemory());
+    EXPECT_FALSE(Recipe.mayReadOrWriteMemory());
   }
 
   {
@@ -1011,6 +1022,9 @@ TEST(VPRecipeTest, MayHaveSideEffects) {
     VPReductionRecipe Recipe(nullptr, nullptr, &ChainOp, &CondOp, &VecOp,
                              nullptr);
     EXPECT_FALSE(Recipe.mayHaveSideEffects());
+    EXPECT_FALSE(Recipe.mayReadFromMemory());
+    EXPECT_FALSE(Recipe.mayWriteToMemory());
+    EXPECT_FALSE(Recipe.mayReadOrWriteMemory());
   }
 
   {
@@ -1018,10 +1032,27 @@ TEST(VPRecipeTest, MayHaveSideEffects) {
         new LoadInst(Int32, UndefValue::get(Int32Ptr), "", false, Align(1));
     VPValue Addr;
     VPValue Mask;
-    VPWidenMemoryInstructionRecipe Recipe(*Load, &Addr, &Mask);
+    VPWidenMemoryInstructionRecipe Recipe(*Load, &Addr, &Mask, true, false);
     EXPECT_TRUE(Recipe.mayHaveSideEffects());
-
+    EXPECT_TRUE(Recipe.mayReadFromMemory());
+    EXPECT_FALSE(Recipe.mayWriteToMemory());
+    EXPECT_TRUE(Recipe.mayReadOrWriteMemory());
     delete Load;
+  }
+
+  {
+    auto *Store = new StoreInst(UndefValue::get(Int32),
+                                UndefValue::get(Int32Ptr), false, Align(1));
+    VPValue Addr;
+    VPValue Mask;
+    VPValue StoredV;
+    VPWidenMemoryInstructionRecipe Recipe(*Store, &Addr, &StoredV, &Mask, false,
+                                          false);
+    EXPECT_TRUE(Recipe.mayHaveSideEffects());
+    EXPECT_FALSE(Recipe.mayReadFromMemory());
+    EXPECT_TRUE(Recipe.mayWriteToMemory());
+    EXPECT_TRUE(Recipe.mayReadOrWriteMemory());
+    delete Store;
   }
 
   {
@@ -1034,6 +1065,9 @@ TEST(VPRecipeTest, MayHaveSideEffects) {
     Args.push_back(&Op2);
     VPWidenCallRecipe Recipe(*Call, make_range(Args.begin(), Args.end()));
     EXPECT_TRUE(Recipe.mayHaveSideEffects());
+    EXPECT_TRUE(Recipe.mayReadFromMemory());
+    EXPECT_TRUE(Recipe.mayWriteToMemory());
+    EXPECT_TRUE(Recipe.mayReadOrWriteMemory());
     delete Call;
   }
 
@@ -1041,8 +1075,12 @@ TEST(VPRecipeTest, MayHaveSideEffects) {
   {
     VPValue Op1;
     VPValue Op2;
-    VPInstruction Recipe(Instruction::Add, {&Op1, &Op2});
+    VPInstruction VPInst(Instruction::Add, {&Op1, &Op2});
+    VPRecipeBase &Recipe = VPInst;
     EXPECT_TRUE(Recipe.mayHaveSideEffects());
+    EXPECT_TRUE(Recipe.mayReadFromMemory());
+    EXPECT_TRUE(Recipe.mayWriteToMemory());
+    EXPECT_TRUE(Recipe.mayReadOrWriteMemory());
   }
 }
 

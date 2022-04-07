@@ -27,8 +27,7 @@ class CommandObjectSettingsSet : public CommandObjectRaw {
 public:
   CommandObjectSettingsSet(CommandInterpreter &interpreter)
       : CommandObjectRaw(interpreter, "settings set",
-                         "Set the value of the specified debugger setting."),
-        m_options() {
+                         "Set the value of the specified debugger setting.") {
     CommandArgumentEntry arg1;
     CommandArgumentEntry arg2;
     CommandArgumentData var_name_arg;
@@ -87,7 +86,7 @@ insert-before or insert-after.");
 
   class CommandOptions : public Options {
   public:
-    CommandOptions() : Options(), m_global(false) {}
+    CommandOptions() = default;
 
     ~CommandOptions() override = default;
 
@@ -103,6 +102,9 @@ insert-before or insert-after.");
       case 'g':
         m_global = true;
         break;
+      case 'e':
+        m_exists = true;
+        break;
       default:
         llvm_unreachable("Unimplemented option");
       }
@@ -113,6 +115,7 @@ insert-before or insert-after.");
     void OptionParsingStarting(ExecutionContext *execution_context) override {
       m_global = false;
       m_force = false;
+      m_exists = false;
     }
 
     llvm::ArrayRef<OptionDefinition> GetDefinitions() override {
@@ -120,8 +123,9 @@ insert-before or insert-after.");
     }
 
     // Instance variables to hold the values for command options.
-    bool m_global;
-    bool m_force;
+    bool m_global = false;
+    bool m_force = false;
+    bool m_exists = false;
   };
 
   void
@@ -177,7 +181,6 @@ protected:
 
     if ((argc < min_argc) && (!m_options.m_global)) {
       result.AppendError("'settings set' takes more arguments");
-      result.SetStatus(eReturnStatusFailed);
       return false;
     }
 
@@ -185,7 +188,6 @@ protected:
     if ((var_name == nullptr) || (var_name[0] == '\0')) {
       result.AppendError(
           "'settings set' command requires a valid variable name");
-      result.SetStatus(eReturnStatusFailed);
       return false;
     }
 
@@ -196,7 +198,6 @@ protected:
           &m_exe_ctx, eVarSetOperationClear, var_name, llvm::StringRef()));
       if (error.Fail()) {
         result.AppendError(error.AsCString());
-        result.SetStatus(eReturnStatusFailed);
         return false;
       }
       return result.Succeeded();
@@ -223,14 +224,12 @@ protected:
                                              var_name, var_value);
     }
 
-    if (error.Fail()) {
+    if (error.Fail() && !m_options.m_exists) {
       result.AppendError(error.AsCString());
-      result.SetStatus(eReturnStatusFailed);
       return false;
-    } else {
-      result.SetStatus(eReturnStatusSuccessFinishResult);
     }
 
+    result.SetStatus(eReturnStatusSuccessFinishResult);
     return result.Succeeded();
   }
 
@@ -285,7 +284,6 @@ protected:
           result.GetOutputStream().EOL();
         } else {
           result.AppendError(error.AsCString());
-          result.SetStatus(eReturnStatusFailed);
         }
       }
     } else {
@@ -309,8 +307,7 @@ public:
             "Write matching debugger settings and their "
             "current values to a file that can be read in with "
             "\"settings read\". Defaults to writing all settings.",
-            nullptr),
-        m_options() {
+            nullptr) {
     CommandArgumentEntry arg1;
     CommandArgumentData var_name_arg;
 
@@ -332,7 +329,7 @@ public:
 
   class CommandOptions : public Options {
   public:
-    CommandOptions() : Options() {}
+    CommandOptions() = default;
 
     ~CommandOptions() override = default;
 
@@ -374,7 +371,7 @@ protected:
     FileSpec file_spec(m_options.m_filename);
     FileSystem::Instance().Resolve(file_spec);
     std::string path(file_spec.GetPath());
-    auto options = File::eOpenOptionWrite | File::eOpenOptionCanCreate;
+    auto options = File::eOpenOptionWriteOnly | File::eOpenOptionCanCreate;
     if (m_options.m_append)
       options |= File::eOpenOptionAppend;
     else
@@ -385,7 +382,6 @@ protected:
 
     if (!out_file.GetFile().IsValid()) {
       result.AppendErrorWithFormat("%s: unable to write to file", path.c_str());
-      result.SetStatus(eReturnStatusFailed);
       return false;
     }
 
@@ -403,7 +399,6 @@ protected:
           &clean_ctx, out_file, arg.ref(), OptionValue::eDumpGroupExport));
       if (!error.Success()) {
         result.AppendError(error.AsCString());
-        result.SetStatus(eReturnStatusFailed);
       }
     }
 
@@ -424,8 +419,7 @@ public:
       : CommandObjectParsed(
             interpreter, "settings read",
             "Read settings previously saved to a file with \"settings write\".",
-            nullptr),
-        m_options() {}
+            nullptr) {}
 
   ~CommandObjectSettingsRead() override = default;
 
@@ -433,7 +427,7 @@ public:
 
   class CommandOptions : public Options {
   public:
-    CommandOptions() : Options() {}
+    CommandOptions() = default;
 
     ~CommandOptions() override = default;
 
@@ -543,7 +537,6 @@ protected:
         } else {
           result.AppendErrorWithFormat("invalid property path '%s'",
                                        property_path);
-          result.SetStatus(eReturnStatusFailed);
         }
       }
     } else {
@@ -624,7 +617,6 @@ protected:
                          "or an array followed by one or more indexes, or a "
                          "dictionary followed by one or more key names to "
                          "remove");
-      result.SetStatus(eReturnStatusFailed);
       return false;
     }
 
@@ -632,7 +624,6 @@ protected:
     if ((var_name == nullptr) || (var_name[0] == '\0')) {
       result.AppendError(
           "'settings remove' command requires a valid variable name");
-      result.SetStatus(eReturnStatusFailed);
       return false;
     }
 
@@ -644,7 +635,6 @@ protected:
         &m_exe_ctx, eVarSetOperationRemove, var_name, var_value));
     if (error.Fail()) {
       result.AppendError(error.AsCString());
-      result.SetStatus(eReturnStatusFailed);
       return false;
     }
 
@@ -728,7 +718,6 @@ protected:
     if ((var_name == nullptr) || (var_name[0] == '\0')) {
       result.AppendError("'settings replace' command requires a valid variable "
                          "name; No value supplied");
-      result.SetStatus(eReturnStatusFailed);
       return false;
     }
 
@@ -740,7 +729,6 @@ protected:
         &m_exe_ctx, eVarSetOperationReplace, var_name, var_value));
     if (error.Fail()) {
       result.AppendError(error.AsCString());
-      result.SetStatus(eReturnStatusFailed);
       return false;
     } else {
       result.SetStatus(eReturnStatusSuccessFinishNoResult);
@@ -822,7 +810,6 @@ protected:
 
     if (argc < 3) {
       result.AppendError("'settings insert-before' takes more arguments");
-      result.SetStatus(eReturnStatusFailed);
       return false;
     }
 
@@ -830,7 +817,6 @@ protected:
     if ((var_name == nullptr) || (var_name[0] == '\0')) {
       result.AppendError("'settings insert-before' command requires a valid "
                          "variable name; No value supplied");
-      result.SetStatus(eReturnStatusFailed);
       return false;
     }
 
@@ -842,7 +828,6 @@ protected:
         &m_exe_ctx, eVarSetOperationInsertBefore, var_name, var_value));
     if (error.Fail()) {
       result.AppendError(error.AsCString());
-      result.SetStatus(eReturnStatusFailed);
       return false;
     }
 
@@ -921,7 +906,6 @@ protected:
 
     if (argc < 3) {
       result.AppendError("'settings insert-after' takes more arguments");
-      result.SetStatus(eReturnStatusFailed);
       return false;
     }
 
@@ -929,7 +913,6 @@ protected:
     if ((var_name == nullptr) || (var_name[0] == '\0')) {
       result.AppendError("'settings insert-after' command requires a valid "
                          "variable name; No value supplied");
-      result.SetStatus(eReturnStatusFailed);
       return false;
     }
 
@@ -941,7 +924,6 @@ protected:
         &m_exe_ctx, eVarSetOperationInsertAfter, var_name, var_value));
     if (error.Fail()) {
       result.AppendError(error.AsCString());
-      result.SetStatus(eReturnStatusFailed);
       return false;
     }
 
@@ -1008,7 +990,6 @@ protected:
 
     if (argc < 2) {
       result.AppendError("'settings append' takes more arguments");
-      result.SetStatus(eReturnStatusFailed);
       return false;
     }
 
@@ -1016,7 +997,6 @@ protected:
     if ((var_name == nullptr) || (var_name[0] == '\0')) {
       result.AppendError("'settings append' command requires a valid variable "
                          "name; No value supplied");
-      result.SetStatus(eReturnStatusFailed);
       return false;
     }
 
@@ -1031,7 +1011,6 @@ protected:
         &m_exe_ctx, eVarSetOperationAppend, var_name, var_value));
     if (error.Fail()) {
       result.AppendError(error.AsCString());
-      result.SetStatus(eReturnStatusFailed);
       return false;
     }
 
@@ -1117,7 +1096,6 @@ protected:
     if (m_options.m_clear_all) {
       if (argc != 0) {
         result.AppendError("'settings clear --all' doesn't take any arguments");
-        result.SetStatus(eReturnStatusFailed);
         return false;
       }
       GetDebugger().GetValueProperties()->Clear();
@@ -1126,7 +1104,6 @@ protected:
 
     if (argc != 1) {
       result.AppendError("'settings clear' takes exactly one argument");
-      result.SetStatus(eReturnStatusFailed);
       return false;
     }
 
@@ -1134,7 +1111,6 @@ protected:
     if ((var_name == nullptr) || (var_name[0] == '\0')) {
       result.AppendError("'settings clear' command requires a valid variable "
                          "name; No value supplied");
-      result.SetStatus(eReturnStatusFailed);
       return false;
     }
 
@@ -1142,7 +1118,6 @@ protected:
         &m_exe_ctx, eVarSetOperationClear, var_name, llvm::StringRef()));
     if (error.Fail()) {
       result.AppendError(error.AsCString());
-      result.SetStatus(eReturnStatusFailed);
       return false;
     }
 

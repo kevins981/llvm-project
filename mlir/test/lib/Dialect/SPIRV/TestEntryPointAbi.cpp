@@ -20,10 +20,17 @@ using namespace mlir;
 
 namespace {
 /// Pass to set the spv.entry_point_abi
-class TestSpirvEntryPointABIPass
+struct TestSpirvEntryPointABIPass
     : public PassWrapper<TestSpirvEntryPointABIPass,
                          OperationPass<gpu::GPUModuleOp>> {
-public:
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(TestSpirvEntryPointABIPass)
+
+  StringRef getArgument() const final { return "test-spirv-entry-point-abi"; }
+  StringRef getDescription() const final {
+    return "Set the spv.entry_point_abi attribute on GPU kernel function "
+           "within the "
+           "module, intended for testing only";
+  }
   TestSpirvEntryPointABIPass() = default;
   TestSpirvEntryPointABIPass(const TestSpirvEntryPointABIPass &) {}
   void runOnOperation() override;
@@ -35,7 +42,7 @@ private:
           "Workgroup size to use for all gpu.func kernels in the module, "
           "specified with x-dimension first, y-dimension next and z-dimension "
           "last. Unspecified dimensions will be set to 1"),
-      llvm::cl::ZeroOrMore, llvm::cl::MiscFlags::CommaSeparated};
+      llvm::cl::ZeroOrMore};
 };
 } // namespace
 
@@ -56,9 +63,6 @@ void TestSpirvEntryPointABIPass::runOnOperation() {
 
 namespace mlir {
 void registerTestSpirvEntryPointABIPass() {
-  PassRegistration<TestSpirvEntryPointABIPass> registration(
-      "test-spirv-entry-point-abi",
-      "Set the spv.entry_point_abi attribute on GPU kernel function within the "
-      "module, intended for testing only");
+  PassRegistration<TestSpirvEntryPointABIPass>();
 }
 } // namespace mlir

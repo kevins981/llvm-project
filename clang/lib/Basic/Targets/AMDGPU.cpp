@@ -17,7 +17,6 @@
 #include "clang/Basic/MacroBuilder.h"
 #include "clang/Basic/TargetBuiltins.h"
 #include "llvm/ADT/StringSwitch.h"
-#include "llvm/Frontend/OpenMP/OMPGridValues.h"
 
 using namespace clang;
 using namespace clang::targets;
@@ -184,6 +183,8 @@ bool AMDGPUTargetInfo::initFeatureMap(
   // XXX - What does the member GPU mean if device name string passed here?
   if (isAMDGCN(getTriple())) {
     switch (llvm::AMDGPU::parseArchAMDGCN(CPU)) {
+    case GK_GFX1036:
+    case GK_GFX1035:
     case GK_GFX1034:
     case GK_GFX1033:
     case GK_GFX1032:
@@ -214,6 +215,7 @@ bool AMDGPUTargetInfo::initFeatureMap(
       Features["dot6-insts"] = true;
       Features["dot7-insts"] = true;
       LLVM_FALLTHROUGH;
+    case GK_GFX1013:
     case GK_GFX1010:
       Features["dl-insts"] = true;
       Features["ci-insts"] = true;
@@ -226,6 +228,9 @@ bool AMDGPUTargetInfo::initFeatureMap(
       Features["s-memrealtime"] = true;
       Features["s-memtime-inst"] = true;
       break;
+    case GK_GFX940:
+      Features["gfx940-insts"] = true;
+      LLVM_FALLTHROUGH;
     case GK_GFX90A:
       Features["gfx90a-insts"] = true;
       LLVM_FALLTHROUGH;
@@ -333,7 +338,6 @@ AMDGPUTargetInfo::AMDGPUTargetInfo(const llvm::Triple &Triple,
                   llvm::AMDGPU::getArchAttrR600(GPUKind)) {
   resetDataLayout(isAMDGCN(getTriple()) ? DataLayoutStringAMDGCN
                                         : DataLayoutStringR600);
-  GridValues = llvm::omp::AMDGPUGpuGridValues;
 
   setAddressSpaceMap(Triple.getOS() == llvm::Triple::Mesa3D ||
                      !isAMDGCN(Triple));
@@ -356,8 +360,8 @@ AMDGPUTargetInfo::AMDGPUTargetInfo(const llvm::Triple &Triple,
   MaxAtomicPromoteWidth = MaxAtomicInlineWidth = 64;
 }
 
-void AMDGPUTargetInfo::adjust(LangOptions &Opts) {
-  TargetInfo::adjust(Opts);
+void AMDGPUTargetInfo::adjust(DiagnosticsEngine &Diags, LangOptions &Opts) {
+  TargetInfo::adjust(Diags, Opts);
   // ToDo: There are still a few places using default address space as private
   // address space in OpenCL, which needs to be cleaned up, then Opts.OpenCL
   // can be removed from the following line.

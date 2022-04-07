@@ -56,8 +56,8 @@ if (MSVC_IDE OR XCODE)
   endif()
 endif()
 
-# stdlib_stdexcept.cpp depends on libc++ internals.
-include_directories("${LIBCXXABI_LIBCXX_PATH}")
+# Some files depend on libc++ internals.
+include_directories("${LIBCXXABI_LIBCXX_PATH}/src")
 
 if (LIBCXXABI_HAS_CXA_THREAD_ATEXIT_IMPL)
   add_definitions(-DHAVE___CXA_THREAD_ATEXIT_IMPL)
@@ -136,7 +136,8 @@ if ( APPLE )
       message(WARNING "LLVM_USE_SANITIZER=${LLVM_USE_SANITIZER} is not supported on OS X")
     endif()
     if (LIBFILE)
-      find_compiler_rt_dir(LIBDIR)
+      find_compiler_rt_library(builtins LIBCXXABI_BUILTINS_LIBRARY)
+      get_filename_component(LIBDIR "${LIBCXXABI_BUILTINS_LIBRARY}" DIRECTORY)
       if (NOT IS_DIRECTORY "${LIBDIR}")
         message(FATAL_ERROR "Cannot find compiler-rt directory on OS X required for LLVM_USE_SANITIZER")
       endif()
@@ -177,33 +178,22 @@ endif()
 if (LIBCXXABI_ENABLE_SHARED)
   add_library(cxxabi_shared SHARED ${LIBCXXABI_SOURCES} ${LIBCXXABI_HEADERS})
   target_link_libraries(cxxabi_shared PRIVATE cxx-headers ${LIBCXXABI_SHARED_LIBRARIES} ${LIBCXXABI_LIBRARIES})
+  target_link_libraries(cxxabi_shared PUBLIC cxxabi-headers)
   if (TARGET pstl::ParallelSTL)
     target_link_libraries(cxxabi_shared PUBLIC pstl::ParallelSTL)
   endif()
   set_target_properties(cxxabi_shared
-                        PROPERTIES
-                          CXX_EXTENSIONS
-                            OFF
-                          CXX_STANDARD
-                            20
-                          CXX_STANDARD_REQUIRED
-                            OFF
-                          COMPILE_FLAGS
-                            "${LIBCXXABI_COMPILE_FLAGS}"
-                          LINK_FLAGS
-                            "${LIBCXXABI_LINK_FLAGS}"
-                          OUTPUT_NAME
-                            "c++abi"
-                          SOVERSION
-                            "1"
-                          VERSION
-                            "${LIBCXXABI_LIBRARY_VERSION}"
-                          DEFINE_SYMBOL
-                            "")
-
-  if(LIBCXXABI_ENABLE_PIC)
-    set_target_properties(cxxabi_shared PROPERTIES POSITION_INDEPENDENT_CODE ON)
-  endif()
+    PROPERTIES
+      CXX_EXTENSIONS OFF
+      CXX_STANDARD 20
+      CXX_STANDARD_REQUIRED OFF
+      COMPILE_FLAGS "${LIBCXXABI_COMPILE_FLAGS}"
+      LINK_FLAGS "${LIBCXXABI_LINK_FLAGS}"
+      OUTPUT_NAME "c++abi"
+      SOVERSION "1"
+      VERSION "${LIBCXXABI_LIBRARY_VERSION}"
+      DEFINE_SYMBOL ""
+  )
 
   list(APPEND LIBCXXABI_BUILD_TARGETS "cxxabi_shared")
   if (LIBCXXABI_INSTALL_SHARED_LIBRARY)
@@ -244,27 +234,19 @@ endif()
 if (LIBCXXABI_ENABLE_STATIC)
   add_library(cxxabi_static STATIC ${LIBCXXABI_SOURCES} ${LIBCXXABI_HEADERS})
   target_link_libraries(cxxabi_static PRIVATE cxx-headers ${LIBCXXABI_STATIC_LIBRARIES} ${LIBCXXABI_LIBRARIES})
+  target_link_libraries(cxxabi_static PUBLIC cxxabi-headers)
   if (TARGET pstl::ParallelSTL)
     target_link_libraries(cxxabi_static PUBLIC pstl::ParallelSTL)
   endif()
   set_target_properties(cxxabi_static
-                        PROPERTIES
-                          CXX_EXTENSIONS
-                            OFF
-                          CXX_STANDARD
-                            20
-                          CXX_STANDARD_REQUIRED
-                            OFF
-                          COMPILE_FLAGS
-                            "${LIBCXXABI_COMPILE_FLAGS}"
-                          LINK_FLAGS
-                            "${LIBCXXABI_LINK_FLAGS}"
-                          OUTPUT_NAME
-                            "c++abi")
-
-  if(LIBCXXABI_ENABLE_PIC)
-    set_target_properties(cxxabi_static PROPERTIES POSITION_INDEPENDENT_CODE ON)
-  endif()
+    PROPERTIES
+      CXX_EXTENSIONS OFF
+      CXX_STANDARD 20
+      CXX_STANDARD_REQUIRED OFF
+      COMPILE_FLAGS "${LIBCXXABI_COMPILE_FLAGS}"
+      LINK_FLAGS "${LIBCXXABI_LINK_FLAGS}"
+      OUTPUT_NAME "c++abi"
+    )
 
   if(LIBCXXABI_HERMETIC_STATIC_LIBRARY)
     append_flags_if_supported(CXXABI_STATIC_LIBRARY_FLAGS -fvisibility=hidden)
@@ -313,12 +295,13 @@ if (LIBCXXABI_INSTALL_LIBRARY)
   install(TARGETS ${LIBCXXABI_INSTALL_TARGETS}
     LIBRARY DESTINATION ${LIBCXXABI_INSTALL_LIBRARY_DIR} COMPONENT cxxabi
     ARCHIVE DESTINATION ${LIBCXXABI_INSTALL_LIBRARY_DIR} COMPONENT cxxabi
+    RUNTIME DESTINATION ${LIBCXXABI_INSTALL_RUNTIME_DIR} COMPONENT cxxabi
     )
 endif()
 
 if (NOT CMAKE_CONFIGURATION_TYPES AND LIBCXXABI_INSTALL_LIBRARY)
   add_custom_target(install-cxxabi
-    DEPENDS cxxabi
+    DEPENDS cxxabi install-cxxabi-headers
     COMMAND "${CMAKE_COMMAND}"
             -DCMAKE_INSTALL_COMPONENT=cxxabi
             -P "${LIBCXXABI_BINARY_DIR}/cmake_install.cmake")

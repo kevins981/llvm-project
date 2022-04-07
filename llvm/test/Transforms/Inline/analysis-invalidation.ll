@@ -1,4 +1,4 @@
-; RUN: opt -passes=inliner-wrapper < %s -disable-output -debug-pass-manager 2>&1 | FileCheck %s
+; RUN: opt -passes=inline < %s -disable-output -debug-pass-manager 2>&1 | FileCheck %s
 
 ; We shouldn't invalidate any function analyses on g since it's never modified.
 
@@ -6,7 +6,7 @@
 ; CHECK: Invalidating{{.*}} on f
 ; CHECK-NOT: Invalidating{{.*}} on g
 
-define void @f() {
+define void @f() noinline {
   call void @g()
   ret void
 }

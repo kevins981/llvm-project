@@ -7,12 +7,15 @@ add_mlir_library(MLIRVectorTestPasses
   LINK_LIBS PUBLIC
   MLIRAffine
   MLIRAnalysis
+  MLIRFunc
   MLIRLinalg
+  MLIRLinalgTransforms
+  MLIRLLVMIR
   MLIRMemRef
   MLIRPass
   MLIRSCF
-  MLIRStandard
   MLIRTransformUtils
   MLIRVector
   MLIRVectorToSCF
+  MLIRX86Vector
   )

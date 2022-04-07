@@ -1,4 +1,4 @@
-! RUN: %S/test_errors.sh %s %t %flang_fc1
+! RUN: %python %S/test_errors.py %s %flang_fc1
 ! Check for semantic errors in NULLIFY statements
 
 INTEGER, PARAMETER :: maxvalue=1024
@@ -34,7 +34,7 @@ End Program
 ! that has reported errors
 module badNullify
   interface
-    module function ptrFun()
+    function ptrFun()
       integer, pointer :: ptrFun
     end function
   end interface

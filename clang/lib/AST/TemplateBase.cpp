@@ -31,6 +31,7 @@
 #include "llvm/ADT/FoldingSet.h"
 #include "llvm/ADT/None.h"
 #include "llvm/ADT/SmallString.h"
+#include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/Compiler.h"
@@ -58,15 +59,17 @@ static void printIntegral(const TemplateArgument &TemplArg, raw_ostream &Out,
   const Type *T = TemplArg.getIntegralType().getTypePtr();
   const llvm::APSInt &Val = TemplArg.getAsIntegral();
 
-  if (const EnumType *ET = T->getAs<EnumType>()) {
-    for (const EnumConstantDecl* ECD : ET->getDecl()->enumerators()) {
-      // In Sema::CheckTemplateArugment, enum template arguments value are
-      // extended to the size of the integer underlying the enum type.  This
-      // may create a size difference between the enum value and template
-      // argument value, requiring isSameValue here instead of operator==.
-      if (llvm::APSInt::isSameValue(ECD->getInitVal(), Val)) {
-        ECD->printQualifiedName(Out, Policy);
-        return;
+  if (Policy.UseEnumerators) {
+    if (const EnumType *ET = T->getAs<EnumType>()) {
+      for (const EnumConstantDecl *ECD : ET->getDecl()->enumerators()) {
+        // In Sema::CheckTemplateArugment, enum template arguments value are
+        // extended to the size of the integer underlying the enum type.  This
+        // may create a size difference between the enum value and template
+        // argument value, requiring isSameValue here instead of operator==.
+        if (llvm::APSInt::isSameValue(ECD->getInitVal(), Val)) {
+          ECD->printQualifiedName(Out, Policy);
+          return;
+        }
       }
     }
   }
@@ -433,7 +436,7 @@ void TemplateArgument::print(const PrintingPolicy &Policy, raw_ostream &Out,
     NamedDecl *ND = getAsDecl();
     if (getParamTypeForDecl()->isRecordType()) {
       if (auto *TPO = dyn_cast<TemplateParamObjectDecl>(ND)) {
-        TPO->printAsInit(Out);
+        TPO->printAsInit(Out, Policy);
         break;
       }
     }
@@ -451,7 +454,7 @@ void TemplateArgument::print(const PrintingPolicy &Policy, raw_ostream &Out,
     break;
 
   case Template:
-    getAsTemplate().print(Out, Policy);
+    getAsTemplate().print(Out, Policy, TemplateName::Qualified::Fully);
     break;
 
   case TemplateExpansion:
@@ -554,7 +557,7 @@ static const T &DiagTemplateArg(const T &DB, const TemplateArgument &Arg) {
     return DB << "nullptr";
 
   case TemplateArgument::Integral:
-    return DB << Arg.getAsIntegral().toString(10);
+    return DB << toString(Arg.getAsIntegral(), 10);
 
   case TemplateArgument::Template:
     return DB << Arg.getAsTemplate();

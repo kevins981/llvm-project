@@ -57,6 +57,7 @@
 
 #include "llvm/Transforms/Scalar/CallSiteSplitting.h"
 #include "llvm/ADT/Statistic.h"
+#include "llvm/Analysis/DomTreeUpdater.h"
 #include "llvm/Analysis/TargetLibraryInfo.h"
 #include "llvm/Analysis/TargetTransformInfo.h"
 #include "llvm/IR/IntrinsicInst.h"
@@ -65,7 +66,6 @@
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Transforms/Scalar.h"
-#include "llvm/Transforms/Utils/BasicBlockUtils.h"
 #include "llvm/Transforms/Utils/Cloning.h"
 #include "llvm/Transforms/Utils/Local.h"
 
@@ -467,7 +467,7 @@ static PredsWithCondsTy shouldSplitOnPredicatedArgument(CallBase &CB,
   BasicBlock *StopAt = CSDTNode ? CSDTNode->getIDom()->getBlock() : nullptr;
 
   SmallVector<std::pair<BasicBlock *, ConditionsTy>, 2> PredsCS;
-  for (auto *Pred : make_range(Preds.rbegin(), Preds.rend())) {
+  for (auto *Pred : llvm::reverse(Preds)) {
     ConditionsTy Conditions;
     // Record condition on edge BB(CS) <- Pred
     recordCondition(CB, Pred, CB.getParent(), Conditions);
@@ -505,8 +505,7 @@ static bool doCallSiteSplitting(Function &F, TargetLibraryInfo &TLI,
 
   DomTreeUpdater DTU(&DT, DomTreeUpdater::UpdateStrategy::Lazy);
   bool Changed = false;
-  for (Function::iterator BI = F.begin(), BE = F.end(); BI != BE;) {
-    BasicBlock &BB = *BI++;
+  for (BasicBlock &BB : llvm::make_early_inc_range(F)) {
     auto II = BB.getFirstNonPHIOrDbg()->getIterator();
     auto IE = BB.getTerminator()->getIterator();
     // Iterate until we reach the terminator instruction. tryToSplitCallSite

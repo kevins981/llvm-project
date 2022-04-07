@@ -63,10 +63,10 @@
 #include "llvm/Transforms/Scalar/SpeculativeExecution.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/Analysis/GlobalsModRef.h"
+#include "llvm/Analysis/TargetTransformInfo.h"
 #include "llvm/Analysis/ValueTracking.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicInst.h"
-#include "llvm/IR/Module.h"
 #include "llvm/IR/Operator.h"
 #include "llvm/InitializePasses.h"
 #include "llvm/Support/CommandLine.h"
@@ -268,7 +268,7 @@ bool SpeculativeExecutionPass::considerHoistingFromTo(
     if (const auto *DVI = dyn_cast<DbgVariableIntrinsic>(U)) {
       return all_of(DVI->location_ops(), [&NotHoisted](Value *V) {
         if (const auto *I = dyn_cast_or_null<Instruction>(V)) {
-          if (NotHoisted.count(I) == 0)
+          if (!NotHoisted.contains(I))
             return true;
         }
         return false;

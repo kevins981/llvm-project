@@ -1,4 +1,4 @@
-// RUN: mlir-opt %s -split-input-file -test-affine-loop-unswitch | FileCheck %s
+// RUN: mlir-opt %s -split-input-file -pass-pipeline="func.func(test-affine-loop-unswitch)" | FileCheck %s
 
 // CHECK-DAG: #[[$SET:.*]] = affine_set<(d0) : (d0 - 2 >= 0)>
 
@@ -245,9 +245,7 @@ func @multiple_if(%N : index) {
   }
   return
 }
-// CHECK:      affine.if
-// CHECK-NEXT:   call
-// CHECK-NEXT: }
+// CHECK:      call
 // CHECK-NEXT: affine.if
 // CHECK-NEXT:   affine.for
 // CHECK-NEXT:     call

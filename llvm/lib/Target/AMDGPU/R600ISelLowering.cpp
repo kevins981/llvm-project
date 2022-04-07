@@ -13,11 +13,12 @@
 
 #include "R600ISelLowering.h"
 #include "AMDGPU.h"
-#include "MCTargetDesc/AMDGPUMCTargetDesc.h"
+#include "MCTargetDesc/R600MCTargetDesc.h"
 #include "R600Defines.h"
 #include "R600InstrInfo.h"
 #include "R600MachineFunctionInfo.h"
 #include "R600Subtarget.h"
+#include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/IR/IntrinsicsAMDGPU.h"
 #include "llvm/IR/IntrinsicsR600.h"
 
@@ -246,12 +247,8 @@ R600TargetLowering::R600TargetLowering(const TargetMachine &TM,
 
   setSchedulingPreference(Sched::Source);
 
-  setTargetDAGCombine(ISD::FP_ROUND);
-  setTargetDAGCombine(ISD::FP_TO_SINT);
-  setTargetDAGCombine(ISD::EXTRACT_VECTOR_ELT);
-  setTargetDAGCombine(ISD::SELECT_CC);
-  setTargetDAGCombine(ISD::INSERT_VECTOR_ELT);
-  setTargetDAGCombine(ISD::LOAD);
+  setTargetDAGCombine({ISD::FP_ROUND, ISD::FP_TO_SINT, ISD::EXTRACT_VECTOR_ELT,
+                       ISD::SELECT_CC, ISD::INSERT_VECTOR_ELT, ISD::LOAD});
 }
 
 static inline bool isEOP(MachineBasicBlock::iterator I) {
@@ -284,9 +281,8 @@ R600TargetLowering::EmitInstrWithCustomInserter(MachineInstr &MI,
 
       NewMI = BuildMI(*BB, I, BB->findDebugLoc(I),
                       TII->get(R600::getLDSNoRetOp(MI.getOpcode())));
-      for (unsigned i = 1, e = MI.getNumOperands(); i < e; ++i) {
-        NewMI.add(MI.getOperand(i));
-      }
+      for (const MachineOperand &MO : llvm::drop_begin(MI.operands()))
+        NewMI.add(MO);
     } else {
       return AMDGPUTargetLowering::EmitInstrWithCustomInserter(MI, BB);
     }
@@ -335,7 +331,9 @@ R600TargetLowering::EmitInstrWithCustomInserter(MachineInstr &MI,
         *BB, MI, R600::MOV, MI.getOperand(0).getReg(), R600::ALU_LITERAL_X);
     int Idx = TII->getOperandIdx(*MIB, R600::OpName::literal);
     //TODO: Ugh this is rather ugly
-    MIB->getOperand(Idx) = MI.getOperand(1);
+    const MachineOperand &MO = MI.getOperand(1);
+    MIB->getOperand(Idx).ChangeToGA(MO.getGlobal(), MO.getOffset(),
+                                    MO.getTargetFlags());
     break;
   }
 
@@ -827,7 +825,7 @@ SDValue R600TargetLowering::LowerImplicitParameter(SelectionDAG &DAG, EVT VT,
 
 bool R600TargetLowering::isZero(SDValue Op) const {
   if(ConstantSDNode *Cst = dyn_cast<ConstantSDNode>(Op)) {
-    return Cst->isNullValue();
+    return Cst->isZero();
   } else if(ConstantFPSDNode *CstFP = dyn_cast<ConstantFPSDNode>(Op)){
     return CstFP->isZero();
   } else {
@@ -923,7 +921,7 @@ SDValue R600TargetLowering::LowerSELECT_CC(SDValue Op, SelectionDAG &DAG) const 
       std::swap(LHS, RHS);
       CC = DAG.getCondCode(CCSwapped);
     } else {
-      // Try inverting the conditon and then swapping the operands
+      // Try inverting the condition and then swapping the operands
       ISD::CondCode CCInv = ISD::getSetCCInverse(CCOpcode, CompareVT);
       CCSwapped = ISD::getSetCCSwappedOperands(CCInv);
       if (isCondCodeLegal(CCSwapped, CompareVT.getSimpleVT())) {
@@ -993,7 +991,7 @@ SDValue R600TargetLowering::LowerSELECT_CC(SDValue Op, SelectionDAG &DAG) const 
 /// LLVM generates byte-addressed pointers.  For indirect addressing, we need to
 /// convert these pointers to a register index.  Each register holds
 /// 16 bytes, (4 x 32bit sub-register), but we need to take into account the
-/// \p StackWidth, which tells us how many of the 4 sub-registrers will be used
+/// \p StackWidth, which tells us how many of the 4 sub-registers will be used
 /// for indirect addressing.
 SDValue R600TargetLowering::stackPtrToRegIndex(SDValue Ptr,
                                                unsigned StackWidth,
@@ -1098,7 +1096,7 @@ SDValue R600TargetLowering::lowerPrivateTruncStore(StoreSDNode *Store,
   SDValue ShiftAmt = DAG.getNode(ISD::SHL, DL, MVT::i32, ByteIdx,
                                  DAG.getConstant(3, DL, MVT::i32));
 
-  // TODO: Contrary to the name of the functiom,
+  // TODO: Contrary to the name of the function,
   // it also handles sub i32 non-truncating stores (like i1)
   SDValue SExtValue = DAG.getNode(ISD::SIGN_EXTEND, DL, MVT::i32,
                                   Store->getValue());
@@ -1564,7 +1562,7 @@ EVT R600TargetLowering::getSetCCResultType(const DataLayout &DL, LLVMContext &,
 }
 
 bool R600TargetLowering::canMergeStoresTo(unsigned AS, EVT MemVT,
-                                          const SelectionDAG &DAG) const {
+                                          const MachineFunction &MF) const {
   // Local and Private addresses do not handle vectors. Limit to i32
   if ((AS == AMDGPUAS::LOCAL_ADDRESS || AS == AMDGPUAS::PRIVATE_ADDRESS)) {
     return (MemVT.getSizeInBits() <= 32);
@@ -1608,7 +1606,7 @@ static SDValue CompactSwizzlableVector(
     if (NewBldVec[i].isUndef())
       // We mask write here to teach later passes that the ith element of this
       // vector is undef. Thus we can use it to reduce 128 bits reg usage,
-      // break false dependencies and additionnaly make assembly easier to read.
+      // break false dependencies and additionally make assembly easier to read.
       RemapSwizzle[i] = 7; // SEL_MASK_WRITE
     if (ConstantFPSDNode *C = dyn_cast<ConstantFPSDNode>(NewBldVec[i])) {
       if (C->isZero()) {

@@ -579,8 +579,8 @@ genHTML(const Index &Index, StringRef InfoPath, bool IsOutermostList) {
     if (!Index.JumpToSection)
       SpanBody->Children.emplace_back(genReference(Index, InfoPath));
     else
-      SpanBody->Children.emplace_back(genReference(
-          Index, InfoPath, StringRef{Index.JumpToSection.getValue()}));
+      SpanBody->Children.emplace_back(
+          genReference(Index, InfoPath, Index.JumpToSection.getValue().str()));
   }
   if (Index.Children.empty())
     return Out;
@@ -899,7 +899,7 @@ static llvm::Error SerializeIndex(ClangDocContext &CDCtx) {
   }
   CDCtx.Idx.sort();
   llvm::json::OStream J(OS, 2);
-  std::function<void(Index)> IndexToJSON = [&](Index I) {
+  std::function<void(Index)> IndexToJSON = [&](const Index &I) {
     J.object([&] {
       J.attribute("USR", toHex(llvm::toStringRef(I.USR)));
       J.attribute("Name", I.Name);

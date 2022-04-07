@@ -121,7 +121,7 @@ public:
 
   void fillValidCPUList(SmallVectorImpl<StringRef> &Values) const override {
     for (int i = static_cast<int>(CudaArch::SM_20);
-         i < static_cast<int>(CudaArch::LAST); ++i)
+         i < static_cast<int>(CudaArch::Generic); ++i)
       Values.emplace_back(CudaArchToString(static_cast<CudaArch>(i)));
   }
 
@@ -136,6 +136,7 @@ public:
     Opts["__cl_clang_function_pointers"] = true;
     Opts["__cl_clang_variadic_functions"] = true;
     Opts["__cl_clang_non_portable_kernel_param_types"] = true;
+    Opts["__cl_clang_bitfields"] = true;
 
     Opts["cl_khr_fp64"] = true;
     Opts["__opencl_c_fp64"] = true;
@@ -144,6 +145,10 @@ public:
     Opts["cl_khr_global_int32_extended_atomics"] = true;
     Opts["cl_khr_local_int32_base_atomics"] = true;
     Opts["cl_khr_local_int32_extended_atomics"] = true;
+  }
+
+  const llvm::omp::GV &getGridValue() const override {
+    return llvm::omp::NVPTXGridValues;
   }
 
   /// \returns If a target requires an address within a target specific address
@@ -170,7 +175,7 @@ public:
     return CCCR_Warning;
   }
 
-  bool hasExtIntType() const override { return true; }
+  bool hasBitIntType() const override { return true; }
 };
 } // namespace targets
 } // namespace clang

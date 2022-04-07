@@ -21,11 +21,9 @@
 #include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/MDBuilder.h"
-#include "llvm/IR/Metadata.h"
 #include "llvm/InitializePasses.h"
 #include "llvm/Pass.h"
 #include "llvm/Support/CommandLine.h"
-#include "llvm/Support/Debug.h"
 #include "llvm/Transforms/Scalar.h"
 
 using namespace llvm;
@@ -64,7 +62,7 @@ getBranchWeight(Intrinsic::ID IntrinsicID, CallInst *CI, int BranchCount) {
     // __builtin_expect_with_probability
     assert(CI->getNumOperands() >= 3 &&
            "expect with probability must have 3 arguments");
-    ConstantFP *Confidence = dyn_cast<ConstantFP>(CI->getArgOperand(2));
+    auto *Confidence = cast<ConstantFP>(CI->getArgOperand(2));
     double TrueProb = Confidence->getValueAPF().convertToDouble();
     assert((TrueProb >= 0.0 && TrueProb <= 1.0) &&
            "probability value must be in the range [0.0, 1.0]");
@@ -357,11 +355,10 @@ static bool lowerExpectIntrinsic(Function &F) {
     // Remove llvm.expect intrinsics. Iterate backwards in order
     // to process select instructions before the intrinsic gets
     // removed.
-    for (auto BI = BB.rbegin(), BE = BB.rend(); BI != BE;) {
-      Instruction *Inst = &*BI++;
-      CallInst *CI = dyn_cast<CallInst>(Inst);
+    for (Instruction &Inst : llvm::make_early_inc_range(llvm::reverse(BB))) {
+      CallInst *CI = dyn_cast<CallInst>(&Inst);
       if (!CI) {
-        if (SelectInst *SI = dyn_cast<SelectInst>(Inst)) {
+        if (SelectInst *SI = dyn_cast<SelectInst>(&Inst)) {
           if (handleBrSelExpect(*SI))
             ExpectIntrinsicsHandled++;
         }

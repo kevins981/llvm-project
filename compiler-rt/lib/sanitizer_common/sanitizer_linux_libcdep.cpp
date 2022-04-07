@@ -203,7 +203,7 @@ void InitTlsSize() {
   g_use_dlpi_tls_data =
       GetLibcVersion(&major, &minor, &patch) && major == 2 && minor >= 25;
 
-#if defined(__x86_64__) || defined(__powerpc64__)
+#if defined(__aarch64__) || defined(__x86_64__) || defined(__powerpc64__)
   void *get_tls_static_info = dlsym(RTLD_NEXT, "_dl_get_tls_static_info");
   size_t tls_align;
   ((void (*)(size_t *, size_t *))get_tls_static_info)(&g_tls_size, &tls_align);
@@ -216,14 +216,13 @@ void InitTlsSize() { }
 // On glibc x86_64, ThreadDescriptorSize() needs to be precise due to the usage
 // of g_tls_size. On other targets, ThreadDescriptorSize() is only used by lsan
 // to get the pointer to thread-specific data keys in the thread control block.
-#if (SANITIZER_FREEBSD || SANITIZER_LINUX) && !SANITIZER_ANDROID
+#if (SANITIZER_FREEBSD || SANITIZER_LINUX || SANITIZER_SOLARIS) && \
+    !SANITIZER_ANDROID && !SANITIZER_GO
 // sizeof(struct pthread) from glibc.
 static atomic_uintptr_t thread_descriptor_size;
 
-uptr ThreadDescriptorSize() {
-  uptr val = atomic_load_relaxed(&thread_descriptor_size);
-  if (val)
-    return val;
+static uptr ThreadDescriptorSizeFallback() {
+  uptr val = 0;
 #if defined(__x86_64__) || defined(__i386__) || defined(__arm__)
   int major;
   int minor;
@@ -285,8 +284,21 @@ uptr ThreadDescriptorSize() {
 #elif defined(__powerpc64__)
   val = 1776; // from glibc.ppc64le 2.20-8.fc21
 #endif
+  return val;
+}
+
+uptr ThreadDescriptorSize() {
+  uptr val = atomic_load_relaxed(&thread_descriptor_size);
   if (val)
-    atomic_store_relaxed(&thread_descriptor_size, val);
+    return val;
+  // _thread_db_sizeof_pthread is a GLIBC_PRIVATE symbol that is exported in
+  // glibc 2.34 and later.
+  if (unsigned *psizeof = static_cast<unsigned *>(
+          dlsym(RTLD_DEFAULT, "_thread_db_sizeof_pthread")))
+    val = *psizeof;
+  if (!val)
+    val = ThreadDescriptorSizeFallback();
+  atomic_store_relaxed(&thread_descriptor_size, val);
   return val;
 }
 
@@ -308,7 +320,6 @@ static uptr TlsPreTcbSize() {
 }
 #endif
 
-#if !SANITIZER_GO
 namespace {
 struct TlsBlock {
   uptr begin, end, align;
@@ -317,21 +328,44 @@ struct TlsBlock {
 };
 }  // namespace
 
+#ifdef __s390__
+extern "C" uptr __tls_get_offset(void *arg);
+
+static uptr TlsGetOffset(uptr ti_module, uptr ti_offset) {
+  // The __tls_get_offset ABI requires %r12 to point to GOT and %r2 to be an
+  // offset of a struct tls_index inside GOT. We don't possess either of the
+  // two, so violate the letter of the "ELF Handling For Thread-Local
+  // Storage" document and assume that the implementation just dereferences
+  // %r2 + %r12.
+  uptr tls_index[2] = {ti_module, ti_offset};
+  register uptr r2 asm("2") = 0;
+  register void *r12 asm("12") = tls_index;
+  asm("basr %%r14, %[__tls_get_offset]"
+      : "+r"(r2)
+      : [__tls_get_offset] "r"(__tls_get_offset), "r"(r12)
+      : "memory", "cc", "0", "1", "3", "4", "5", "14");
+  return r2;
+}
+#else
 extern "C" void *__tls_get_addr(size_t *);
+#endif
 
 static int CollectStaticTlsBlocks(struct dl_phdr_info *info, size_t size,
                                   void *data) {
   if (!info->dlpi_tls_modid)
     return 0;
   uptr begin = (uptr)info->dlpi_tls_data;
-#ifndef __s390__
   if (!g_use_dlpi_tls_data) {
     // Call __tls_get_addr as a fallback. This forces TLS allocation on glibc
     // and FreeBSD.
+#ifdef __s390__
+    begin = (uptr)__builtin_thread_pointer() +
+            TlsGetOffset(info->dlpi_tls_modid, 0);
+#else
     size_t mod_and_off[2] = {info->dlpi_tls_modid, 0};
     begin = (uptr)__tls_get_addr(mod_and_off);
-  }
 #endif
+  }
   for (unsigned i = 0; i != info->dlpi_phnum; ++i)
     if (info->dlpi_phdr[i].p_type == PT_TLS) {
       static_cast<InternalMmapVector<TlsBlock> *>(data)->push_back(
@@ -373,9 +407,8 @@ __attribute__((unused)) static void GetStaticTlsBoundary(uptr *addr, uptr *size,
   *addr = ranges[l].begin;
   *size = ranges[r - 1].end - ranges[l].begin;
 }
-#endif  // !SANITIZER_GO
 #endif  // (x86_64 || i386 || mips || ...) && (SANITIZER_FREEBSD ||
-        // SANITIZER_LINUX) && !SANITIZER_ANDROID
+        // SANITIZER_LINUX) && !SANITIZER_ANDROID && !SANITIZER_GO
 
 #if SANITIZER_NETBSD
 static struct tls_tcb * ThreadSelfTlsTcb() {
@@ -427,12 +460,16 @@ static void GetTls(uptr *addr, uptr *size) {
     *size = 0;
   }
 #elif SANITIZER_GLIBC && defined(__x86_64__)
-  // For x86-64, use an O(1) approach which requires precise
-  // ThreadDescriptorSize. g_tls_size was initialized in InitTlsSize.
+  // For aarch64 and x86-64, use an O(1) approach which requires relatively
+  // precise ThreadDescriptorSize. g_tls_size was initialized in InitTlsSize.
   asm("mov %%fs:16,%0" : "=r"(*addr));
   *size = g_tls_size;
   *addr -= *size;
   *addr += ThreadDescriptorSize();
+#elif SANITIZER_GLIBC && defined(__aarch64__)
+  *addr = reinterpret_cast<uptr>(__builtin_thread_pointer()) -
+          ThreadDescriptorSize();
+  *size = g_tls_size + ThreadDescriptorSize();
 #elif SANITIZER_GLIBC && defined(__powerpc64__)
   // Workaround for glibc<2.25(?). 2.27 is known to not need this.
   uptr tp;
@@ -440,7 +477,7 @@ static void GetTls(uptr *addr, uptr *size) {
   const uptr pre_tcb_size = TlsPreTcbSize();
   *addr = tp - pre_tcb_size;
   *size = g_tls_size + pre_tcb_size;
-#elif SANITIZER_FREEBSD || SANITIZER_LINUX
+#elif SANITIZER_FREEBSD || SANITIZER_LINUX || SANITIZER_SOLARIS
   uptr align;
   GetStaticTlsBoundary(addr, size, &align);
 #if defined(__x86_64__) || defined(__i386__) || defined(__s390__) || \
@@ -501,11 +538,6 @@ static void GetTls(uptr *addr, uptr *size) {
       *addr = (uptr)tcb->tcb_dtv[1];
     }
   }
-#elif SANITIZER_SOLARIS
-  // FIXME
-  *addr = 0;
-  *size = 0;
-#else
 #error "Unknown OS"
 #endif
 }
@@ -576,6 +608,34 @@ static int AddModuleSegments(const char *module_name, dl_phdr_info *info,
       bool writable = phdr->p_flags & PF_W;
       cur_module.addAddressRange(cur_beg, cur_end, executable,
                                  writable);
+    } else if (phdr->p_type == PT_NOTE) {
+#  ifdef NT_GNU_BUILD_ID
+      uptr off = 0;
+      while (off + sizeof(ElfW(Nhdr)) < phdr->p_memsz) {
+        auto *nhdr = reinterpret_cast<const ElfW(Nhdr) *>(info->dlpi_addr +
+                                                          phdr->p_vaddr + off);
+        constexpr auto kGnuNamesz = 4;  // "GNU" with NUL-byte.
+        static_assert(kGnuNamesz % 4 == 0, "kGnuNameSize is aligned to 4.");
+        if (nhdr->n_type == NT_GNU_BUILD_ID && nhdr->n_namesz == kGnuNamesz) {
+          if (off + sizeof(ElfW(Nhdr)) + nhdr->n_namesz + nhdr->n_descsz >
+              phdr->p_memsz) {
+            // Something is very wrong, bail out instead of reading potentially
+            // arbitrary memory.
+            break;
+          }
+          const char *name =
+              reinterpret_cast<const char *>(nhdr) + sizeof(*nhdr);
+          if (internal_memcmp(name, "GNU", 3) == 0) {
+            const char *value = reinterpret_cast<const char *>(nhdr) +
+                                sizeof(*nhdr) + kGnuNamesz;
+            cur_module.setUuid(value, nhdr->n_descsz);
+            break;
+          }
+        }
+        off += sizeof(*nhdr) + RoundUpTo(nhdr->n_namesz, 4) +
+               RoundUpTo(nhdr->n_descsz, 4);
+      }
+#  endif
     }
   }
   modules->push_back(cur_module);

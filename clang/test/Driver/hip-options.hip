@@ -14,6 +14,14 @@
 // DEVINIT: clang{{.*}}" "-cc1" {{.*}}"-fgpu-allow-device-init"
 // DEVINIT: clang{{.*}}" "-cc1" {{.*}}"-fgpu-allow-device-init"
 
+// Check -fgpu-default-stream=per-thread.
+// RUN: %clang -### -nogpuinc -nogpulib -fgpu-default-stream=per-thread \
+// RUN:   %s -save-temps 2>&1 | FileCheck -check-prefix=PTH %s
+// PTH: clang{{.*}}" "-cc1" {{.*}}"-E" {{.*}}"-fgpu-default-stream=per-thread"
+// PTH: clang{{.*}}" "-cc1" {{.*}}"-fgpu-default-stream=per-thread" {{.*}}"-x" "hip-cpp-output"
+// PTH: clang{{.*}}" "-cc1" {{.*}}"-E" {{.*}}"-fgpu-default-stream=per-thread"
+// PTH: clang{{.*}}" "-cc1" {{.*}}"-fgpu-default-stream=per-thread" {{.*}}"-x" "hip-cpp-output"
+
 // RUN: %clang -### -x hip -target x86_64-pc-windows-msvc -fms-extensions \
 // RUN:   -mllvm -amdgpu-early-inline-all=true  %s 2>&1 | \
 // RUN:   FileCheck -check-prefix=MLLVM %s
@@ -56,3 +64,46 @@
 // RUN:   --offload-arch=gfx906 -fgpu-inline-threshold=1000 %s 2>&1 | FileCheck -check-prefix=THRESH %s
 // THRESH: clang{{.*}} "-triple" "amdgcn-amd-amdhsa" {{.*}} "-mllvm" "-inline-threshold=1000"
 // THRESH-NOT: clang{{.*}} "-triple" "x86_64-unknown-linux-gnu" {{.*}} "-inline-threshold=1000"
+
+// Check -foffload-lto=thin translated correctly.
+
+// RUN: %clang -### -target x86_64-unknown-linux-gnu -nogpuinc -nogpulib \
+// RUN:   --cuda-gpu-arch=gfx906 -foffload-lto=thin -fwhole-program-vtables %s 2>&1 \
+// RUN:   | FileCheck -check-prefix=HIPTHINLTO %s
+
+// RUN: %clang -### -target x86_64-unknown-linux-gnu -nogpuinc -nogpulib \
+// RUN:   --cuda-gpu-arch=gfx906 -fgpu-rdc -foffload-lto=thin -fwhole-program-vtables %s 2>&1 \
+// RUN:   | FileCheck -check-prefix=HIPTHINLTO %s
+
+// Ensure we don't error about -fwhole-program-vtables for the non-device offload compile.
+// HIPTHINLTO-NOT: error: invalid argument '-fwhole-program-vtables' only allowed with '-flto'
+// HIPTHINLTO-NOT: clang{{.*}} "-triple" "x86_64-unknown-linux-gnu" {{.*}} "-flto-unit"
+// HIPTHINLTO: clang{{.*}} "-triple" "amdgcn-amd-amdhsa" {{.*}} "-flto=thin" "-flto-unit" {{.*}} "-fwhole-program-vtables"
+// HIPTHINLTO-NOT: clang{{.*}} "-triple" "x86_64-unknown-linux-gnu" {{.*}} "-flto-unit"
+// HIPTHINLTO: lld{{.*}}"-plugin-opt=mcpu=gfx906" "-plugin-opt=thinlto" "-plugin-opt=-force-import-all"
+
+// Check that -flto=thin is handled correctly, particularly with -fwhole-program-vtables.
+//
+// RUN: %clang -### -target x86_64-unknown-linux-gnu -nogpuinc -nogpulib \
+// RUN:   --cuda-gpu-arch=gfx906 -flto=thin -fwhole-program-vtables %s 2>&1 \
+// RUN:   | FileCheck -check-prefix=THINLTO %s
+
+// Ensure we don't error about -fwhole-program-vtables for the device offload compile. We should
+// drop -fwhole-program-vtables for the device offload compile and pass it through for the
+// non-device offload compile along with -flto=thin.
+// THINLTO-NOT: error: invalid argument '-fwhole-program-vtables' only allowed with '-flto'
+// THINLTO-NOT: clang{{.*}}" "-triple" "amdgcn-amd-amdhsa" {{.*}} "-fwhole-program-vtables"
+// THINLTO: clang{{.*}}" "-triple" "x86_64-unknown-linux-gnu" {{.*}} "-flto=thin" {{.*}} "-fwhole-program-vtables"
+// THINLTO-NOT: clang{{.*}}" "-triple" "amdgcn-amd-amdhsa" {{.*}} "-fwhole-program-vtables"
+
+// Check -fopenmp is allowed with HIP but -fopenmp-targets= is not allowed.
+
+// RUN: %clang -### -target x86_64-unknown-linux-gnu -nogpuinc -nogpulib \
+// RUN:   --offload-arch=gfx906 -fopenmp %s 2>&1 | FileCheck -check-prefix=OMP %s
+// OMP-NOT: clang{{.*}} "-triple" "amdgcn-amd-amdhsa" {{.*}} "-fopenmp"
+// OMP: clang{{.*}} "-triple" "x86_64-unknown-linux-gnu" {{.*}} "-fopenmp"
+
+// RUN: not %clang -target x86_64-unknown-linux-gnu -nogpuinc -nogpulib \
+// RUN:   --offload-arch=gfx906 -fopenmp -fopenmp-targets=amdgcn %s 2>&1 \
+// RUN:   | FileCheck -check-prefix=OMPTGT %s
+// OMPTGT: unsupported option '-fopenmp-targets=' for language mode 'HIP'

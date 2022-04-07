@@ -12,9 +12,11 @@
 //===----------------------------------------------------------------------===//
 
 #include "AMDGPU.h"
+#include "AMDGPUCombinerHelper.h"
 #include "AMDGPULegalizerInfo.h"
 #include "GCNSubtarget.h"
 #include "MCTargetDesc/AMDGPUMCTargetDesc.h"
+#include "llvm/CodeGen/GlobalISel/CSEInfo.h"
 #include "llvm/CodeGen/GlobalISel/Combiner.h"
 #include "llvm/CodeGen/GlobalISel/CombinerHelper.h"
 #include "llvm/CodeGen/GlobalISel/CombinerInfo.h"
@@ -34,10 +36,11 @@ protected:
   MachineIRBuilder &B;
   MachineFunction &MF;
   MachineRegisterInfo &MRI;
-  CombinerHelper &Helper;
+  AMDGPUCombinerHelper &Helper;
 
 public:
-  AMDGPUPreLegalizerCombinerHelper(MachineIRBuilder &B, CombinerHelper &Helper)
+  AMDGPUPreLegalizerCombinerHelper(MachineIRBuilder &B,
+                                   AMDGPUCombinerHelper &Helper)
       : B(B), MF(B.getMF()), MRI(*B.getMRI()), Helper(Helper){};
 
   struct ClampI64ToI16MatchInfo {
@@ -130,7 +133,7 @@ void AMDGPUPreLegalizerCombinerHelper::applyClampI64ToI16(
 
   assert(MI.getOpcode() != AMDGPU::G_AMDGPU_CVT_PK_I16_I32);
 
-  const LLT V2S16 = LLT::vector(2, 16);
+  const LLT V2S16 = LLT::fixed_vector(2, 16);
   auto CvtPk =
       B.buildInstr(AMDGPU::G_AMDGPU_CVT_PK_I16_I32, {V2S16},
                    {Unmerge.getReg(0), Unmerge.getReg(1)}, MI.getFlags());
@@ -154,12 +157,12 @@ void AMDGPUPreLegalizerCombinerHelper::applyClampI64ToI16(
 
 class AMDGPUPreLegalizerCombinerHelperState {
 protected:
-  CombinerHelper &Helper;
+  AMDGPUCombinerHelper &Helper;
   AMDGPUPreLegalizerCombinerHelper &PreLegalizerHelper;
 
 public:
   AMDGPUPreLegalizerCombinerHelperState(
-      CombinerHelper &Helper,
+      AMDGPUCombinerHelper &Helper,
       AMDGPUPreLegalizerCombinerHelper &PreLegalizerHelper)
       : Helper(Helper), PreLegalizerHelper(PreLegalizerHelper) {}
 };
@@ -196,12 +199,12 @@ public:
 bool AMDGPUPreLegalizerCombinerInfo::combine(GISelChangeObserver &Observer,
                                               MachineInstr &MI,
                                               MachineIRBuilder &B) const {
-  CombinerHelper Helper(Observer, B, KB, MDT);
+  AMDGPUCombinerHelper Helper(Observer, B, KB, MDT);
   AMDGPUPreLegalizerCombinerHelper PreLegalizerHelper(B, Helper);
   AMDGPUGenPreLegalizerCombinerHelper Generated(GeneratedRuleCfg, Helper,
                                                 PreLegalizerHelper);
 
-  if (Generated.tryCombineAll(Observer, MI, B, Helper))
+  if (Generated.tryCombineAll(Observer, MI, B))
     return true;
 
   switch (MI.getOpcode()) {

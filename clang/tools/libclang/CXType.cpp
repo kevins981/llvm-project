@@ -60,6 +60,7 @@ static CXTypeKind GetBuiltinTypeKind(const BuiltinType *BT) {
     BTCASE(ULongAccum);
     BTCASE(Float16);
     BTCASE(Float128);
+    BTCASE(Ibm128);
     BTCASE(NullPtr);
     BTCASE(Overload);
     BTCASE(Dependent);
@@ -115,6 +116,7 @@ static CXTypeKind GetTypeKind(QualType T) {
     TKCASE(Elaborated);
     TKCASE(Pipe);
     TKCASE(Attributed);
+    TKCASE(BTFTagAttributed);
     TKCASE(Atomic);
     default:
       return CXType_Unexposed;
@@ -134,6 +136,10 @@ CXType cxtype::MakeCXType(QualType T, CXTranslationUnit TU) {
         // equivalent type.
         return MakeCXType(ATT->getEquivalentType(), TU);
       }
+    }
+    if (auto *ATT = T->getAs<BTFTagAttributedType>()) {
+      if (!(TU->ParsingOptions & CXTranslationUnit_IncludeAttributedTypes))
+        return MakeCXType(ATT->getWrappedType(), TU);
     }
     // Handle paren types as the original type
     if (auto *PTT = T->getAs<ParenType>()) {
@@ -577,6 +583,7 @@ CXString clang_getTypeKindSpelling(enum CXTypeKind K) {
     TKIND(ULongAccum);
     TKIND(Float16);
     TKIND(Float128);
+    TKIND(Ibm128);
     TKIND(NullPtr);
     TKIND(Overload);
     TKIND(Dependent);
@@ -608,6 +615,7 @@ CXString clang_getTypeKindSpelling(enum CXTypeKind K) {
     TKIND(Elaborated);
     TKIND(Pipe);
     TKIND(Attributed);
+    TKIND(BTFTagAttributed);
     TKIND(BFloat16);
 #define IMAGE_TYPE(ImgType, Id, SingletonId, Access, Suffix) TKIND(Id);
 #include "clang/Basic/OpenCLImageTypes.def"
@@ -664,6 +672,7 @@ CXCallingConv clang_getFunctionTypeCallingConv(CXType X) {
       TCALLINGCONV(AAPCS_VFP);
       TCALLINGCONV(IntelOclBicc);
       TCALLINGCONV(Swift);
+      TCALLINGCONV(SwiftAsync);
       TCALLINGCONV(PreserveMost);
       TCALLINGCONV(PreserveAll);
     case CC_SpirFunction: return CXCallingConv_Unexposed;
@@ -1047,6 +1056,9 @@ CXType clang_Type_getModifiedType(CXType CT) {
 
   if (auto *ATT = T->getAs<AttributedType>())
     return MakeCXType(ATT->getModifiedType(), GetTU(CT));
+
+  if (auto *ATT = T->getAs<BTFTagAttributedType>())
+    return MakeCXType(ATT->getWrappedType(), GetTU(CT));
 
   return MakeCXType(QualType(), GetTU(CT));
 }

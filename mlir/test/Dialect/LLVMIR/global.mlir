@@ -80,12 +80,12 @@ llvm.mlir.global internal constant @sectionvar("teststring")  {section = ".mysec
 
 // -----
 
-// expected-error @+1 {{requires string attribute 'sym_name'}}
-"llvm.mlir.global"() ({}) {type = i64, constant, value = 42 : i64} : () -> ()
+// expected-error @+1 {{op requires attribute 'sym_name'}}
+"llvm.mlir.global"() ({}) {type = i64, constant, global_type = i64, value = 42 : i64} : () -> ()
 
 // -----
 
-// expected-error @+1 {{requires attribute 'type'}}
+// expected-error @+1 {{requires attribute 'global_type'}}
 "llvm.mlir.global"() ({}) {sym_name = "foo", constant, value = 42 : i64} : () -> ()
 
 // -----
@@ -96,18 +96,20 @@ llvm.mlir.global internal constant @constant(37.0) : !llvm.label
 // -----
 
 // expected-error @+1 {{'addr_space' failed to satisfy constraint: 32-bit signless integer attribute whose value is non-negative}}
-"llvm.mlir.global"() ({}) {sym_name = "foo", type = i64, value = 42 : i64, addr_space = -1 : i32, linkage = 0} : () -> ()
+"llvm.mlir.global"() ({}) {sym_name = "foo", global_type = i64, value = 42 : i64, addr_space = -1 : i32, linkage = #llvm.linkage<private>} : () -> ()
 
 // -----
 
 // expected-error @+1 {{'addr_space' failed to satisfy constraint: 32-bit signless integer attribute whose value is non-negative}}
-"llvm.mlir.global"() ({}) {sym_name = "foo", type = i64, value = 42 : i64, addr_space = 1.0 : f32, linkage = 0} : () -> ()
+"llvm.mlir.global"() ({}) {sym_name = "foo", global_type = i64, value = 42 : i64, addr_space = 1.0 : f32, linkage = #llvm.linkage<private>} : () -> ()
 
 // -----
 
 func @foo() {
   // expected-error @+1 {{must appear at the module level}}
   llvm.mlir.global internal @bar(42) : i32
+
+  return
 }
 
 // -----
@@ -170,8 +172,7 @@ llvm.func @bar() {
 
 // -----
 
-// expected-error @+2 {{'llvm.mlir.global' op expects regions to end with 'llvm.return', found 'llvm.mlir.constant'}}
-// expected-note @+1 {{in custom textual format, the absence of terminator implies 'llvm.return'}}
+// expected-error @+2 {{block with no terminator}}
 llvm.mlir.global internal @g() : i64 {
   %c = llvm.mlir.constant(42 : i64) : i64
 }
@@ -207,3 +208,21 @@ func @mismatch_addr_space() {
   // expected-error @+1 {{op the type must be a pointer to the type of the referenced global}}
   llvm.mlir.addressof @g : !llvm.ptr<i64, 4>
 }
+
+// -----
+
+llvm.func @ctor() {
+  llvm.return
+}
+
+// CHECK: llvm.mlir.global_ctors {ctors = [@ctor], priorities = [0 : i32]}
+llvm.mlir.global_ctors { ctors = [@ctor], priorities = [0 : i32]}
+
+// -----
+
+llvm.func @dtor() {
+  llvm.return
+}
+
+// CHECK: llvm.mlir.global_dtors {dtors = [@dtor], priorities = [0 : i32]}
+llvm.mlir.global_dtors { dtors = [@dtor], priorities = [0 : i32]}

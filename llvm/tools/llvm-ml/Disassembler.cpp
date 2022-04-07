@@ -20,9 +20,9 @@
 #include "llvm/MC/MCRegisterInfo.h"
 #include "llvm/MC/MCStreamer.h"
 #include "llvm/MC/MCSubtargetInfo.h"
+#include "llvm/MC/TargetRegistry.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/SourceMgr.h"
-#include "llvm/Support/TargetRegistry.h"
 #include "llvm/Support/raw_ostream.h"
 
 using namespace llvm;
@@ -142,8 +142,7 @@ int Disassembler::disassemble(const Target &T, const std::string &TripleName,
   }
 
   // Set up the MCContext for creating symbols and MCExpr's.
-  MCContext Ctx(Triple(TripleName), MAI.get(), MRI.get(), /*MOFI=*/nullptr,
-                &STI);
+  MCContext Ctx(Triple(TripleName), MAI.get(), MRI.get(), &STI);
 
   std::unique_ptr<const MCDisassembler> DisAsm(
       T.createMCDisassembler(STI, Ctx));
@@ -153,7 +152,7 @@ int Disassembler::disassemble(const Target &T, const std::string &TripleName,
   }
 
   // Set up initial section manually here
-  Streamer.InitSections(false);
+  Streamer.initSections(false, STI);
 
   bool ErrorOccurred = false;
 

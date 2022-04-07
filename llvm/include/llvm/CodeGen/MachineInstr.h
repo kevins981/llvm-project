@@ -26,7 +26,6 @@
 #include "llvm/CodeGen/TargetOpcodes.h"
 #include "llvm/IR/DebugLoc.h"
 #include "llvm/IR/InlineAsm.h"
-#include "llvm/IR/PseudoProbe.h"
 #include "llvm/MC/MCInstrDesc.h"
 #include "llvm/MC/MCSymbol.h"
 #include "llvm/Support/ArrayRecycler.h"
@@ -38,6 +37,9 @@
 
 namespace llvm {
 
+class DILabel;
+class Instruction;
+class MDNode;
 class AAResults;
 template <typename T> class ArrayRef;
 class DIExpression;
@@ -249,7 +251,7 @@ private:
                  PointerSumTypeMember<EIIK_OutOfLine, ExtraInfo *>>
       Info;
 
-  DebugLoc debugLoc;                    // Source line information.
+  DebugLoc DbgLoc; // Source line information.
 
   /// Unique instruction number. Used by DBG_INSTR_REFs to refer to the values
   /// defined by this instruction.
@@ -267,7 +269,7 @@ private:
   /// This constructor create a MachineInstr and add the implicit operands.
   /// It reserves space for number of operands specified by
   /// MCInstrDesc.  An explicit DebugLoc is supplied.
-  MachineInstr(MachineFunction &, const MCInstrDesc &tid, DebugLoc dl,
+  MachineInstr(MachineFunction &, const MCInstrDesc &TID, DebugLoc DL,
                bool NoImp = false);
 
   // MachineInstrs are pool-allocated and owned by MachineFunction.
@@ -415,7 +417,7 @@ public:
   void unbundleFromSucc();
 
   /// Returns the debug location id of this MachineInstr.
-  const DebugLoc &getDebugLoc() const { return debugLoc; }
+  const DebugLoc &getDebugLoc() const { return DbgLoc; }
 
   /// Return the operand containing the offset to be used if this DBG_VALUE
   /// instruction is indirect; will be an invalid register if this value is
@@ -455,6 +457,11 @@ public:
   /// one already, a new and unique number will be assigned.
   unsigned getDebugInstrNum();
 
+  /// Fetch instruction number of this MachineInstr -- but before it's inserted
+  /// into \p MF. Needed for transformations that create an instruction but
+  /// don't immediately insert them.
+  unsigned getDebugInstrNum(MachineFunction &MF);
+
   /// Examine the instruction number of this MachineInstr. May be zero if
   /// it hasn't been assigned a number yet.
   unsigned peekDebugInstrNum() const { return DebugInstrNum; }
@@ -462,6 +469,12 @@ public:
   /// Set instruction number of this MachineInstr. Avoid using unless you're
   /// deserializing this information.
   void setDebugInstrNum(unsigned Num) { DebugInstrNum = Num; }
+
+  /// Drop any variable location debugging information associated with this
+  /// instruction. Use when an instruction is modified in such a way that it no
+  /// longer defines the value it used to. Variable locations using that value
+  /// will be dropped.
+  void dropDebugNumber() { DebugInstrNum = 0; }
 
   /// Emit an error referring to the source location of this instruction.
   /// This should only be used for inline assembly that is somehow
@@ -506,7 +519,7 @@ public:
   SmallSet<Register, 4> getUsedDebugRegs() const {
     assert(isDebugValue() && "not a DBG_VALUE*");
     SmallSet<Register, 4> UsedRegs;
-    for (auto MO : debug_operands())
+    for (const auto &MO : debug_operands())
       if (MO.isReg() && MO.getReg())
         UsedRegs.insert(MO.getReg());
     return UsedRegs;
@@ -797,6 +810,12 @@ public:
   /// correspond to a real machine instruction.
   bool isPseudo(QueryType Type = IgnoreBundle) const {
     return hasProperty(MCID::Pseudo, Type);
+  }
+
+  /// Return true if this instruction doesn't produce any output in the form of
+  /// executable instructions.
+  bool isMetaInstruction(QueryType Type = IgnoreBundle) const {
+    return hasProperty(MCID::Meta, Type);
   }
 
   bool isReturn(QueryType Type = AnyInBundle) const {
@@ -1162,12 +1181,6 @@ public:
   /// eraseFromBundle() to erase individual bundled instructions.
   void eraseFromParent();
 
-  /// Unlink 'this' from the containing basic block and delete it.
-  ///
-  /// For all definitions mark their uses in DBG_VALUE nodes
-  /// as undefined. Otherwise like eraseFromParent().
-  void eraseFromParentAndMarkDBGValuesForRemoval();
-
   /// Unlink 'this' form its basic block and delete it.
   ///
   /// If the instruction is part of a bundle, the other instructions in the
@@ -1207,8 +1220,9 @@ public:
   }
   bool isDebugLabel() const { return getOpcode() == TargetOpcode::DBG_LABEL; }
   bool isDebugRef() const { return getOpcode() == TargetOpcode::DBG_INSTR_REF; }
+  bool isDebugPHI() const { return getOpcode() == TargetOpcode::DBG_PHI; }
   bool isDebugInstr() const {
-    return isDebugValue() || isDebugLabel() || isDebugRef();
+    return isDebugValue() || isDebugLabel() || isDebugRef() || isDebugPHI();
   }
   bool isDebugOrPseudoInstr() const {
     return isDebugInstr() || isPseudoProbe();
@@ -1298,28 +1312,6 @@ public:
   bool isIdentityCopy() const {
     return isCopy() && getOperand(0).getReg() == getOperand(1).getReg() &&
       getOperand(0).getSubReg() == getOperand(1).getSubReg();
-  }
-
-  /// Return true if this instruction doesn't produce any output in the form of
-  /// executable instructions.
-  bool isMetaInstruction() const {
-    switch (getOpcode()) {
-    default:
-      return false;
-    case TargetOpcode::IMPLICIT_DEF:
-    case TargetOpcode::KILL:
-    case TargetOpcode::CFI_INSTRUCTION:
-    case TargetOpcode::EH_LABEL:
-    case TargetOpcode::GC_LABEL:
-    case TargetOpcode::DBG_VALUE:
-    case TargetOpcode::DBG_VALUE_LIST:
-    case TargetOpcode::DBG_INSTR_REF:
-    case TargetOpcode::DBG_LABEL:
-    case TargetOpcode::LIFETIME_START:
-    case TargetOpcode::LIFETIME_END:
-    case TargetOpcode::PSEUDO_PROBE:
-      return true;
-    }
   }
 
   /// Return true if this is a transient instruction that is either very likely
@@ -1467,9 +1459,6 @@ public:
   ///
   /// If GroupNo is not NULL, it will receive the number of the operand group
   /// containing OpIdx.
-  ///
-  /// The flag operand is an immediate that can be decoded with methods like
-  /// InlineAsm::hasRegClassConstraint().
   int findInlineAsmFlagIdx(unsigned OpIdx, unsigned *GroupNo = nullptr) const;
 
   /// Compute the static register class constraint for operand OpIdx.
@@ -1728,18 +1717,18 @@ public:
 
   /// Replace the instruction descriptor (thus opcode) of
   /// the current instruction with a new one.
-  void setDesc(const MCInstrDesc &tid) { MCID = &tid; }
+  void setDesc(const MCInstrDesc &TID) { MCID = &TID; }
 
   /// Replace current source information with new such.
   /// Avoid using this, the constructor argument is preferable.
-  void setDebugLoc(DebugLoc dl) {
-    debugLoc = std::move(dl);
-    assert(debugLoc.hasTrivialDestructor() && "Expected trivial destructor");
+  void setDebugLoc(DebugLoc DL) {
+    DbgLoc = std::move(DL);
+    assert(DbgLoc.hasTrivialDestructor() && "Expected trivial destructor");
   }
 
   /// Erase an operand from an instruction, leaving it with one
   /// fewer operand than it started with.
-  void RemoveOperand(unsigned OpNo);
+  void removeOperand(unsigned OpNo);
 
   /// Clear this MachineInstr's memory reference descriptor list.  This resets
   /// the memrefs to their most conservative state.  This should be used only
@@ -1849,17 +1838,6 @@ public:
     }
   }
 
-  PseudoProbeAttributes getPseudoProbeAttribute() const {
-    assert(isPseudoProbe() && "Must be a pseudo probe instruction");
-    return (PseudoProbeAttributes)getOperand(3).getImm();
-  }
-
-  void addPseudoProbeAttribute(PseudoProbeAttributes Attr) {
-    assert(isPseudoProbe() && "Must be a pseudo probe instruction");
-    MachineOperand &AttrOperand = getOperand(3);
-    AttrOperand.setImm(AttrOperand.getImm() | (uint32_t)Attr);
-  }
-
 private:
   /// If this instruction is embedded into a MachineFunction, return the
   /// MachineRegisterInfo object for the current function, otherwise
@@ -1869,12 +1847,12 @@ private:
   /// Unlink all of the register operands in this instruction from their
   /// respective use lists.  This requires that the operands already be on their
   /// use lists.
-  void RemoveRegOperandsFromUseLists(MachineRegisterInfo&);
+  void removeRegOperandsFromUseLists(MachineRegisterInfo&);
 
   /// Add all of the register operands in this instruction from their
   /// respective use lists.  This requires that the operands not be on their
   /// use lists yet.
-  void AddRegOperandsToUseLists(MachineRegisterInfo&);
+  void addRegOperandsToUseLists(MachineRegisterInfo&);
 
   /// Slow path for hasProperty when we're dealing with a bundle.
   bool hasPropertyInBundle(uint64_t Mask, QueryType Type) const;

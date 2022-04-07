@@ -13,10 +13,10 @@
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
-#include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/Twine.h"
+#include "llvm/ADT/iterator.h"
 #include "llvm/BinaryFormat/ELF.h"
 #include "llvm/MC/MCAsmBackend.h"
 #include "llvm/MC/MCAsmInfo.h"
@@ -28,18 +28,18 @@
 #include "llvm/MC/MCFixup.h"
 #include "llvm/MC/MCFixupKindInfo.h"
 #include "llvm/MC/MCFragment.h"
-#include "llvm/MC/MCObjectFileInfo.h"
 #include "llvm/MC/MCObjectWriter.h"
 #include "llvm/MC/MCSection.h"
 #include "llvm/MC/MCSectionELF.h"
 #include "llvm/MC/MCSymbol.h"
 #include "llvm/MC/MCSymbolELF.h"
+#include "llvm/MC/MCTargetOptions.h"
 #include "llvm/MC/MCValue.h"
 #include "llvm/MC/StringTableBuilder.h"
 #include "llvm/Support/Alignment.h"
-#include "llvm/Support/Allocator.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/Compression.h"
+#include "llvm/Support/Endian.h"
 #include "llvm/Support/EndianStream.h"
 #include "llvm/Support/Error.h"
 #include "llvm/Support/ErrorHandling.h"
@@ -47,8 +47,6 @@
 #include "llvm/Support/LEB128.h"
 #include "llvm/Support/MathExtras.h"
 #include "llvm/Support/SMLoc.h"
-#include "llvm/Support/StringSaver.h"
-#include "llvm/Support/SwapByteOrder.h"
 #include "llvm/Support/raw_ostream.h"
 #include <algorithm>
 #include <cassert>
@@ -142,7 +140,7 @@ struct ELFWriter {
 
   // TargetObjectWriter wrappers.
   bool is64Bit() const;
-  bool hasRelocationAddend() const;
+  bool usesRela(const MCSectionELF &Sec) const;
 
   uint64_t align(unsigned Alignment);
 
@@ -392,8 +390,9 @@ bool ELFWriter::is64Bit() const {
   return OWriter.TargetObjectWriter->is64Bit();
 }
 
-bool ELFWriter::hasRelocationAddend() const {
-  return OWriter.hasRelocationAddend();
+bool ELFWriter::usesRela(const MCSectionELF &Sec) const {
+  return OWriter.hasRelocationAddend() &&
+         Sec.getType() != ELF::SHT_LLVM_CALL_GRAPH_PROFILE;
 }
 
 // Emit the ELF header.
@@ -785,22 +784,23 @@ MCSectionELF *ELFWriter::createRelocationSection(MCContext &Ctx,
     return nullptr;
 
   const StringRef SectionName = Sec.getName();
-  std::string RelaSectionName = hasRelocationAddend() ? ".rela" : ".rel";
+  bool Rela = usesRela(Sec);
+  std::string RelaSectionName = Rela ? ".rela" : ".rel";
   RelaSectionName += SectionName;
 
   unsigned EntrySize;
-  if (hasRelocationAddend())
+  if (Rela)
     EntrySize = is64Bit() ? sizeof(ELF::Elf64_Rela) : sizeof(ELF::Elf32_Rela);
   else
     EntrySize = is64Bit() ? sizeof(ELF::Elf64_Rel) : sizeof(ELF::Elf32_Rel);
 
-  unsigned Flags = 0;
+  unsigned Flags = ELF::SHF_INFO_LINK;
   if (Sec.getFlags() & ELF::SHF_GROUP)
     Flags = ELF::SHF_GROUP;
 
   MCSectionELF *RelaSection = Ctx.createELFRelSection(
-      RelaSectionName, hasRelocationAddend() ? ELF::SHT_RELA : ELF::SHT_REL,
-      Flags, EntrySize, Sec.getGroup(), &Sec);
+      RelaSectionName, Rela ? ELF::SHT_RELA : ELF::SHT_REL, Flags, EntrySize,
+      Sec.getGroup(), &Sec);
   RelaSection->setAlignment(is64Bit() ? Align(8) : Align(4));
   return RelaSection;
 }
@@ -848,13 +848,9 @@ void ELFWriter::writeSectionData(const MCAssembler &Asm, MCSection &Sec,
   auto &MC = Asm.getContext();
   const auto &MAI = MC.getAsmInfo();
 
-  // Compressing debug_frame requires handling alignment fragments which is
-  // more work (possibly generalizing MCAssembler.cpp:writeFragment to allow
-  // for writing to arbitrary buffers) for little benefit.
   bool CompressionEnabled =
       MAI->compressDebugSections() != DebugCompressionType::None;
-  if (!CompressionEnabled || !SectionName.startswith(".debug_") ||
-      SectionName == ".debug_frame") {
+  if (!CompressionEnabled || !SectionName.startswith(".debug_")) {
     Asm.writeSectionData(W.OS, &Section, Layout);
     return;
   }
@@ -868,13 +864,8 @@ void ELFWriter::writeSectionData(const MCAssembler &Asm, MCSection &Sec,
   Asm.writeSectionData(VecOS, &Section, Layout);
 
   SmallVector<char, 128> CompressedContents;
-  if (Error E = zlib::compress(
-          StringRef(UncompressedData.data(), UncompressedData.size()),
-          CompressedContents)) {
-    consumeError(std::move(E));
-    W.OS << UncompressedData;
-    return;
-  }
+  zlib::compress(StringRef(UncompressedData.data(), UncompressedData.size()),
+                 CompressedContents);
 
   bool ZlibStyle = MAI->compressDebugSections() == DebugCompressionType::Z;
   if (!maybeWriteCompression(UncompressedData.size(), CompressedContents,
@@ -925,6 +916,7 @@ void ELFWriter::writeRelocations(const MCAssembler &Asm,
   // Sort the relocation entries. MIPS needs this.
   OWriter.TargetObjectWriter->sortRelocs(Asm, Relocs);
 
+  const bool Rela = usesRela(Sec);
   for (unsigned i = 0, e = Relocs.size(); i != e; ++i) {
     const ELFRelocationEntry &Entry = Relocs[e - i - 1];
     unsigned Index = Entry.Symbol ? Entry.Symbol->getIndex() : 0;
@@ -943,7 +935,7 @@ void ELFWriter::writeRelocations(const MCAssembler &Asm,
         ERE64.setSymbolAndType(Index, Entry.Type);
         write(ERE64.r_info);
       }
-      if (hasRelocationAddend())
+      if (Rela)
         write(Entry.Addend);
     } else {
       write(uint32_t(Entry.Offset));
@@ -952,7 +944,7 @@ void ELFWriter::writeRelocations(const MCAssembler &Asm,
       ERE32.setSymbolAndType(Index, Entry.Type);
       write(ERE32.r_info);
 
-      if (hasRelocationAddend())
+      if (Rela)
         write(uint32_t(Entry.Addend));
 
       if (OWriter.TargetObjectWriter->getEMachine() == ELF::EM_MIPS) {
@@ -1127,14 +1119,6 @@ uint64_t ELFWriter::writeObject(MCAssembler &Asm, const MCAsmLayout &Layout) {
     OWriter.TargetObjectWriter->addTargetSectionFlags(Ctx, Section);
   }
 
-  MCSectionELF *CGProfileSection = nullptr;
-  if (!Asm.CGProfile.empty()) {
-    CGProfileSection = Ctx.getELFSection(".llvm.call-graph-profile",
-                                         ELF::SHT_LLVM_CALL_GRAPH_PROFILE,
-                                         ELF::SHF_EXCLUDE, 16);
-    SectionIndexMap[CGProfileSection] = addToSectionTable(CGProfileSection);
-  }
-
   for (MCSectionELF *Group : Groups) {
     // Remember the offset into the file for this section.
     const uint64_t SecStart = align(Group->getAlignment());
@@ -1184,17 +1168,6 @@ uint64_t ELFWriter::writeObject(MCAssembler &Asm, const MCAsmLayout &Layout) {
       uint64_t SecEnd = W.OS.tell();
       SectionOffsets[AddrsigSection] = std::make_pair(SecStart, SecEnd);
     }
-  }
-
-  if (CGProfileSection) {
-    uint64_t SecStart = W.OS.tell();
-    for (const MCAssembler::CGProfileEntry &CGPE : Asm.CGProfile) {
-      W.write<uint32_t>(CGPE.From->getSymbol().getIndex());
-      W.write<uint32_t>(CGPE.To->getSymbol().getIndex());
-      W.write<uint64_t>(CGPE.Count);
-    }
-    uint64_t SecEnd = W.OS.tell();
-    SectionOffsets[CGProfileSection] = std::make_pair(SecStart, SecEnd);
   }
 
   {
@@ -1327,6 +1300,7 @@ bool ELFObjectWriter::shouldRelocateWithSymbol(const MCAssembler &Asm,
   case MCSymbolRefExpr::VK_GOT:
   case MCSymbolRefExpr::VK_PLT:
   case MCSymbolRefExpr::VK_GOTPCREL:
+  case MCSymbolRefExpr::VK_GOTPCREL_NORELAX:
   case MCSymbolRefExpr::VK_PPC_GOT_LO:
   case MCSymbolRefExpr::VK_PPC_GOT_HI:
   case MCSymbolRefExpr::VK_PPC_GOT_HA:
@@ -1351,6 +1325,7 @@ bool ELFObjectWriter::shouldRelocateWithSymbol(const MCAssembler &Asm,
     // can update it.
     return true;
   case ELF::STB_GLOBAL:
+  case ELF::STB_GNU_UNIQUE:
     // Global ELF symbols can be preempted by the dynamic linker. The relocation
     // has to point to the symbol for a reason analogous to the STB_WEAK case.
     return true;
@@ -1471,7 +1446,11 @@ void ELFObjectWriter::recordRelocation(MCAssembler &Asm,
     return;
 
   unsigned Type = TargetObjectWriter->getRelocType(Ctx, Target, Fixup, IsPCRel);
-  bool RelocateWithSymbol = shouldRelocateWithSymbol(Asm, RefA, SymA, C, Type);
+  const auto *Parent = cast<MCSectionELF>(Fragment->getParent());
+  // Emiting relocation with sybmol for CG Profile to  help with --cg-profile.
+  bool RelocateWithSymbol =
+      shouldRelocateWithSymbol(Asm, RefA, SymA, C, Type) ||
+      (Parent->getType() == ELF::SHT_LLVM_CALL_GRAPH_PROFILE);
   uint64_t Addend = 0;
 
   FixedValue = !RelocateWithSymbol && SymA && !SymA->isUndefined()

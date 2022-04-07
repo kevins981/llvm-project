@@ -1,4 +1,4 @@
-//===-- runtime/edit-output.cpp ---------------------------------*- C++ -*-===//
+//===-- runtime/edit-output.cpp -------------------------------------------===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -7,32 +7,33 @@
 //===----------------------------------------------------------------------===//
 
 #include "edit-output.h"
+#include "utf.h"
 #include "flang/Common/uint128.h"
 #include <algorithm>
 
 namespace Fortran::runtime::io {
 
-template <typename INT, typename UINT>
-bool EditIntegerOutput(IoStatementState &io, const DataEdit &edit, INT n) {
-  char buffer[130], *end = &buffer[sizeof buffer], *p = end;
-  bool isNegative{false};
-  if constexpr (std::is_same_v<INT, UINT>) {
-    isNegative = (n >> (8 * sizeof(INT) - 1)) != 0;
-  } else {
-    isNegative = n < 0;
-  }
-  UINT un{static_cast<UINT>(isNegative ? -n : n)};
+template <int KIND>
+bool EditIntegerOutput(IoStatementState &io, const DataEdit &edit,
+    common::HostSignedIntType<8 * KIND> n) {
+  char buffer[130], *end{&buffer[sizeof buffer]}, *p{end};
+  bool isNegative{n < 0};
+  using Unsigned = common::HostUnsignedIntType<8 * KIND>;
+  Unsigned un{static_cast<Unsigned>(n)};
   int signChars{0};
   switch (edit.descriptor) {
   case DataEdit::ListDirected:
   case 'G':
   case 'I':
+    if (isNegative) {
+      un = -un;
+    }
     if (isNegative || (edit.modes.editingFlags & signPlus)) {
       signChars = 1; // '-' or '+'
     }
     while (un > 0) {
       auto quotient{un / 10u};
-      *--p = '0' + static_cast<int>(un - UINT{10} * quotient);
+      *--p = '0' + static_cast<int>(un - Unsigned{10} * quotient);
       un = quotient;
     }
     break;
@@ -52,8 +53,11 @@ bool EditIntegerOutput(IoStatementState &io, const DataEdit &edit, INT n) {
       *--p = digit >= 10 ? 'A' + (digit - 10) : '0' + digit;
     }
     break;
+  case 'A': // legacy extension
+    return EditCharacterOutput(
+        io, edit, reinterpret_cast<char *>(&n), sizeof n);
   default:
-    io.GetIoErrorHandler().Crash(
+    io.GetIoErrorHandler().SignalError(IostatErrorInFormat,
         "Data edit descriptor '%c' may not be used with an INTEGER data item",
         edit.descriptor);
     return false;
@@ -156,13 +160,10 @@ bool RealOutputEditingBase::EmitSuffix(const DataEdit &edit) {
 
 template <int binaryPrecision>
 decimal::ConversionToDecimalResult RealOutputEditing<binaryPrecision>::Convert(
-    int significantDigits, const DataEdit &edit, int flags) {
-  if (edit.modes.editingFlags & signPlus) {
-    flags |= decimal::AlwaysSign;
-  }
+    int significantDigits, enum decimal::FortranRounding rounding, int flags) {
   auto converted{decimal::ConvertToDecimal<binaryPrecision>(buffer_,
       sizeof buffer_, static_cast<enum decimal::DecimalConversionFlags>(flags),
-      significantDigits, edit.modes.round, x_)};
+      significantDigits, rounding, x_)};
   if (!converted.str) { // overflow
     io_.GetIoErrorHandler().Crash(
         "RealOutputEditing::Convert : buffer size %zd was insufficient",
@@ -178,6 +179,9 @@ bool RealOutputEditing<binaryPrecision>::EditEorDOutput(const DataEdit &edit) {
   int editWidth{edit.width.value_or(0)}; // 'w' field
   int significantDigits{editDigits};
   int flags{0};
+  if (edit.modes.editingFlags & signPlus) {
+    flags |= decimal::AlwaysSign;
+  }
   if (editWidth == 0) { // "the processor selects the field width"
     if (edit.digits.has_value()) { // E0.d
       editWidth = editDigits + 6; // -.666E+ee
@@ -201,7 +205,7 @@ bool RealOutputEditing<binaryPrecision>::EditEorDOutput(const DataEdit &edit) {
   // In EN editing, multiple attempts may be necessary, so it's in a loop.
   while (true) {
     decimal::ConversionToDecimalResult converted{
-        Convert(significantDigits, edit, flags)};
+        Convert(significantDigits, edit.modes.round, flags)};
     if (IsInfOrNaN(converted)) {
       return EmitPrefix(edit, converted.length, editWidth) &&
           io_.Emit(converted.str, converted.length) && EmitSuffix(edit);
@@ -258,7 +262,11 @@ template <int binaryPrecision>
 bool RealOutputEditing<binaryPrecision>::EditFOutput(const DataEdit &edit) {
   int fracDigits{edit.digits.value_or(0)}; // 'd' field
   const int editWidth{edit.width.value_or(0)}; // 'w' field
+  enum decimal::FortranRounding rounding{edit.modes.round};
   int flags{0};
+  if (edit.modes.editingFlags & signPlus) {
+    flags |= decimal::AlwaysSign;
+  }
   if (editWidth == 0) { // "the processor selects the field width"
     if (!edit.digits.has_value()) { // F0
       flags |= decimal::Minimize;
@@ -268,41 +276,62 @@ bool RealOutputEditing<binaryPrecision>::EditFOutput(const DataEdit &edit) {
   // Multiple conversions may be needed to get the right number of
   // effective rounded fractional digits.
   int extraDigits{0};
+  bool canIncrease{true};
   while (true) {
     decimal::ConversionToDecimalResult converted{
-        Convert(extraDigits + fracDigits, edit, flags)};
+        Convert(extraDigits + fracDigits, rounding, flags)};
     if (IsInfOrNaN(converted)) {
       return EmitPrefix(edit, converted.length, editWidth) &&
           io_.Emit(converted.str, converted.length) && EmitSuffix(edit);
     }
     int scale{IsZero() ? 1 : edit.modes.scale}; // kP
     int expo{converted.decimalExponent + scale};
-    if (expo > extraDigits && extraDigits >= 0) {
+    int signLength{*converted.str == '-' || *converted.str == '+' ? 1 : 0};
+    int convertedDigits{static_cast<int>(converted.length) - signLength};
+    int trailingOnes{0};
+    if (expo > extraDigits && extraDigits >= 0 && canIncrease) {
       extraDigits = expo;
       if (!edit.digits.has_value()) { // F0
         fracDigits = sizeof buffer_ - extraDigits - 2; // sign & NUL
       }
+      canIncrease = false; // only once
       continue;
+    } else if (expo == -fracDigits && convertedDigits > 0) {
+      if (rounding != decimal::FortranRounding::RoundToZero) {
+        // Convert again without rounding so that we can round here
+        rounding = decimal::FortranRounding::RoundToZero;
+        continue;
+      } else if (converted.str[signLength] >= '5') {
+        // Value rounds up to a scaled 1 (e.g., 0.06 for F5.1 -> 0.1)
+        ++expo;
+        convertedDigits = 0;
+        trailingOnes = 1;
+      } else {
+        // Value rounds down to zero
+        expo = 0;
+        convertedDigits = 0;
+      }
     } else if (expo < extraDigits && extraDigits > -fracDigits) {
       extraDigits = std::max(expo, -fracDigits);
       continue;
     }
-    int signLength{*converted.str == '-' || *converted.str == '+' ? 1 : 0};
-    int convertedDigits{static_cast<int>(converted.length) - signLength};
     int digitsBeforePoint{std::max(0, std::min(expo, convertedDigits))};
     int zeroesBeforePoint{std::max(0, expo - digitsBeforePoint)};
     int zeroesAfterPoint{std::min(fracDigits, std::max(0, -expo))};
     int digitsAfterPoint{convertedDigits - digitsBeforePoint};
     int trailingZeroes{flags & decimal::Minimize
             ? 0
-            : std::max(0, fracDigits - (zeroesAfterPoint + digitsAfterPoint))};
+            : std::max(0,
+                  fracDigits -
+                      (zeroesAfterPoint + digitsAfterPoint + trailingOnes))};
     if (digitsBeforePoint + zeroesBeforePoint + zeroesAfterPoint +
-            digitsAfterPoint + trailingZeroes ==
+            digitsAfterPoint + trailingOnes + trailingZeroes ==
         0) {
       zeroesBeforePoint = 1; // "." -> "0."
     }
     int totalLength{signLength + digitsBeforePoint + zeroesBeforePoint +
-        1 /*'.'*/ + zeroesAfterPoint + digitsAfterPoint + trailingZeroes};
+        1 /*'.'*/ + zeroesAfterPoint + digitsAfterPoint + trailingOnes +
+        trailingZeroes};
     int width{editWidth > 0 ? editWidth : totalLength};
     if (totalLength > width) {
       return io_.EmitRepeated('*', width);
@@ -318,6 +347,7 @@ bool RealOutputEditing<binaryPrecision>::EditFOutput(const DataEdit &edit) {
         io_.EmitRepeated('0', zeroesAfterPoint) &&
         io_.Emit(
             converted.str + signLength + digitsBeforePoint, digitsAfterPoint) &&
+        io_.EmitRepeated('1', trailingOnes) &&
         io_.EmitRepeated('0', trailingZeroes) &&
         io_.EmitRepeated(' ', trailingBlanks_) && EmitSuffix(edit);
   }
@@ -332,8 +362,12 @@ DataEdit RealOutputEditing<binaryPrecision>::EditForGOutput(DataEdit edit) {
   if (!edit.width.has_value() || (*edit.width > 0 && significantDigits == 0)) {
     return edit; // Gw.0 -> Ew.0 for w > 0
   }
+  int flags{0};
+  if (edit.modes.editingFlags & signPlus) {
+    flags |= decimal::AlwaysSign;
+  }
   decimal::ConversionToDecimalResult converted{
-      Convert(significantDigits, edit)};
+      Convert(significantDigits, edit.modes.round, flags)};
   if (IsInfOrNaN(converted)) {
     return edit;
   }
@@ -360,7 +394,7 @@ DataEdit RealOutputEditing<binaryPrecision>::EditForGOutput(DataEdit edit) {
 template <int binaryPrecision>
 bool RealOutputEditing<binaryPrecision>::EditListDirectedOutput(
     const DataEdit &edit) {
-  decimal::ConversionToDecimalResult converted{Convert(1, edit)};
+  decimal::ConversionToDecimalResult converted{Convert(1, edit.modes.round)};
   if (IsInfOrNaN(converted)) {
     return EditEorDOutput(edit);
   }
@@ -377,11 +411,10 @@ bool RealOutputEditing<binaryPrecision>::EditListDirectedOutput(
 template <int binaryPrecision>
 bool RealOutputEditing<binaryPrecision>::EditEXOutput(const DataEdit &) {
   io_.GetIoErrorHandler().Crash(
-      "EX output editing is not yet implemented"); // TODO
+      "not yet implemented: EX output editing"); // TODO
 }
 
-template <int binaryPrecision>
-bool RealOutputEditing<binaryPrecision>::Edit(const DataEdit &edit) {
+template <int KIND> bool RealOutputEditing<KIND>::Edit(const DataEdit &edit) {
   switch (edit.descriptor) {
   case 'D':
     return EditEorDOutput(edit);
@@ -396,10 +429,14 @@ bool RealOutputEditing<binaryPrecision>::Edit(const DataEdit &edit) {
   case 'B':
   case 'O':
   case 'Z':
-    return EditIntegerOutput(io_, edit,
-        decimal::BinaryFloatingPointNumber<binaryPrecision>{x_}.raw());
+    return EditIntegerOutput<KIND>(io_, edit,
+        static_cast<common::HostSignedIntType<8 * KIND>>(
+            decimal::BinaryFloatingPointNumber<binaryPrecision>{x_}.raw()));
   case 'G':
     return Edit(EditForGOutput(edit));
+  case 'A': // legacy extension
+    return EditCharacterOutput(
+        io_, edit, reinterpret_cast<char *>(&x_), sizeof x_);
   default:
     if (edit.IsListDirected()) {
       return EditListDirectedOutput(edit);
@@ -431,8 +468,9 @@ bool EditLogicalOutput(IoStatementState &io, const DataEdit &edit, bool truth) {
   }
 }
 
-bool ListDirectedDefaultCharacterOutput(IoStatementState &io,
-    ListDirectedStatementState<Direction::Output> &list, const char *x,
+template <typename CHAR>
+bool ListDirectedCharacterOutput(IoStatementState &io,
+    ListDirectedStatementState<Direction::Output> &list, const CHAR *x,
     std::size_t length) {
   bool ok{true};
   MutableModes &modes{io.mutableModes()};
@@ -440,33 +478,43 @@ bool ListDirectedDefaultCharacterOutput(IoStatementState &io,
   if (modes.delim) {
     ok = ok && list.EmitLeadingSpaceOrAdvance(io);
     // Value is delimited with ' or " marks, and interior
-    // instances of that character are doubled.  When split
-    // over multiple lines, delimit each lines' part.
-    ok = ok && io.Emit(&modes.delim, 1);
+    // instances of that character are doubled.
+    auto EmitOne{[&](CHAR ch) {
+      if (connection.NeedAdvance(1)) {
+        ok = ok && io.AdvanceRecord();
+      }
+      ok = ok && io.EmitEncoded(&ch, 1);
+    }};
+    EmitOne(modes.delim);
     for (std::size_t j{0}; j < length; ++j) {
-      if (connection.NeedAdvance(2)) {
-        ok = ok && io.Emit(&modes.delim, 1) && io.AdvanceRecord() &&
-            io.Emit(&modes.delim, 1);
+      // Doubled delimiters must be put on the same record
+      // in order to be acceptable as list-directed or NAMELIST
+      // input; however, this requirement is not always possible
+      // when the records have a fixed length, as is the case with
+      // internal output.  The standard is silent on what should
+      // happen, and no two extant Fortran implementations do
+      // the same thing when tested with this case.
+      // This runtime splits the doubled delimiters across
+      // two records for lack of a better alternative.
+      if (x[j] == static_cast<CHAR>(modes.delim)) {
+        EmitOne(x[j]);
       }
-      if (x[j] == modes.delim) {
-        ok = ok && io.EmitRepeated(modes.delim, 2);
-      } else {
-        ok = ok && io.Emit(&x[j], 1);
-      }
+      EmitOne(x[j]);
     }
-    ok = ok && io.Emit(&modes.delim, 1);
+    EmitOne(modes.delim);
   } else {
     // Undelimited list-directed output
-    ok = ok &&
-        list.EmitLeadingSpaceOrAdvance(
-            io, length > 0 && !list.lastWasUndelimitedCharacter());
+    ok = ok && list.EmitLeadingSpaceOrAdvance(io, length > 0 ? 1 : 0, true);
     std::size_t put{0};
+    std::size_t oneIfUTF8{connection.isUTF8 ? 1 : length};
     while (ok && put < length) {
-      auto chunk{std::min(length - put, connection.RemainingSpaceInRecord())};
-      ok = ok && io.Emit(x + put, chunk);
-      put += chunk;
-      if (put < length) {
-        ok = ok && io.AdvanceRecord() && io.Emit(" ", 1);
+      if (std::size_t chunk{std::min<std::size_t>(
+              std::min<std::size_t>(length - put, oneIfUTF8),
+              connection.RemainingSpaceInRecord())}) {
+        ok = io.EmitEncoded(x + put, chunk);
+        put += chunk;
+      } else {
+        ok = io.AdvanceRecord() && io.Emit(" ", 1);
       }
     }
     list.set_lastWasUndelimitedCharacter(true);
@@ -474,8 +522,9 @@ bool ListDirectedDefaultCharacterOutput(IoStatementState &io,
   return ok;
 }
 
-bool EditDefaultCharacterOutput(IoStatementState &io, const DataEdit &edit,
-    const char *x, std::size_t length) {
+template <typename CHAR>
+bool EditCharacterOutput(IoStatementState &io, const DataEdit &edit,
+    const CHAR *x, std::size_t length) {
   switch (edit.descriptor) {
   case 'A':
   case 'G':
@@ -489,13 +538,19 @@ bool EditDefaultCharacterOutput(IoStatementState &io, const DataEdit &edit,
   int len{static_cast<int>(length)};
   int width{edit.width.value_or(len)};
   return io.EmitRepeated(' ', std::max(0, width - len)) &&
-      io.Emit(x, std::min(width, len));
+      io.EmitEncoded(x, std::min(width, len));
 }
 
-template bool EditIntegerOutput<std::int64_t, std::uint64_t>(
+template bool EditIntegerOutput<1>(
+    IoStatementState &, const DataEdit &, std::int8_t);
+template bool EditIntegerOutput<2>(
+    IoStatementState &, const DataEdit &, std::int16_t);
+template bool EditIntegerOutput<4>(
+    IoStatementState &, const DataEdit &, std::int32_t);
+template bool EditIntegerOutput<8>(
     IoStatementState &, const DataEdit &, std::int64_t);
-template bool EditIntegerOutput<common::uint128_t, common::uint128_t>(
-    IoStatementState &, const DataEdit &, common::uint128_t);
+template bool EditIntegerOutput<16>(
+    IoStatementState &, const DataEdit &, common::int128_t);
 
 template class RealOutputEditing<2>;
 template class RealOutputEditing<3>;
@@ -504,4 +559,22 @@ template class RealOutputEditing<8>;
 template class RealOutputEditing<10>;
 // TODO: double/double
 template class RealOutputEditing<16>;
+
+template bool ListDirectedCharacterOutput(IoStatementState &,
+    ListDirectedStatementState<Direction::Output> &, const char *,
+    std::size_t chars);
+template bool ListDirectedCharacterOutput(IoStatementState &,
+    ListDirectedStatementState<Direction::Output> &, const char16_t *,
+    std::size_t chars);
+template bool ListDirectedCharacterOutput(IoStatementState &,
+    ListDirectedStatementState<Direction::Output> &, const char32_t *,
+    std::size_t chars);
+
+template bool EditCharacterOutput(
+    IoStatementState &, const DataEdit &, const char *, std::size_t chars);
+template bool EditCharacterOutput(
+    IoStatementState &, const DataEdit &, const char16_t *, std::size_t chars);
+template bool EditCharacterOutput(
+    IoStatementState &, const DataEdit &, const char32_t *, std::size_t chars);
+
 } // namespace Fortran::runtime::io

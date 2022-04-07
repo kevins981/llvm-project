@@ -1,4 +1,4 @@
-! RUN: %S/test_errors.sh %s %t %flang_fc1
+! RUN: %python %S/test_errors.py %s %flang_fc1
 ! Test various conditions in C1158.
 implicit none
 
@@ -99,11 +99,11 @@ contains
     integer :: i
     class(t1),DIMENSION(:),allocatable :: foo
     integer, dimension(2) :: U
-    U = (/ 1,2 /)  
+    U = (/ 1,2 /)
     if (i>0) then
       foo = array1(2,U)
     else if (i<0) then
-      !ERROR: No intrinsic or user-defined ASSIGNMENT(=) matches operand types TYPE(t1) and TYPE(t2)
+      !ERROR: No intrinsic or user-defined ASSIGNMENT(=) matches operand types CLASS(t1) and CLASS(t2)
       foo = array2(2,U)
     end if
   end function

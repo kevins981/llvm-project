@@ -173,7 +173,13 @@ macro(detect_target_arch)
   elseif(__AARCH64)
     add_default_target_arch(aarch64)
   elseif(__X86_64)
-    add_default_target_arch(x86_64)
+    if(CMAKE_SIZEOF_VOID_P EQUAL "4")
+      add_default_target_arch(x32)
+    elseif(CMAKE_SIZEOF_VOID_P EQUAL "8")
+      add_default_target_arch(x86_64)
+    else()
+      message(FATAL_ERROR "Unsupported pointer size for X86_64")
+    endif()
   elseif(__I386)
     add_default_target_arch(i386)
   elseif(__MIPS64) # must be checked before __MIPS
@@ -232,6 +238,10 @@ function(get_compiler_rt_root_source_dir ROOT_DIR_VAR)
     # Compiler-RT Builtins standalone build.
     # `llvm-project/compiler-rt/lib/builtins`
     set(PATH_TO_COMPILER_RT_SOURCE_ROOT "${CompilerRTBuiltins_SOURCE_DIR}/../../")
+  elseif (DEFINED CompilerRTCRT_SOURCE_DIR)
+    # Compiler-RT CRT standalone build.
+    # `llvm-project/compiler-rt/lib/crt`
+    set(PATH_TO_COMPILER_RT_SOURCE_ROOT "${CompilerRTCRT_SOURCE_DIR}/../../")
   elseif(DEFINED CompilerRT_SOURCE_DIR)
     # Compiler-RT standalone build.
     # `llvm-project/compiler-rt`
@@ -283,7 +293,7 @@ macro(load_llvm_config)
       "You are not using the monorepo layout. This configuration is DEPRECATED.")
   endif()
 
-  set(FOUND_LLVM_CMAKE_PATH FALSE)
+  set(FOUND_LLVM_CMAKE_DIR FALSE)
   if (LLVM_CONFIG_PATH)
     execute_process(
       COMMAND ${LLVM_CONFIG_PATH} "--obj-root" "--bindir" "--libdir" "--src-root" "--includedir"
@@ -366,21 +376,21 @@ macro(load_llvm_config)
       RESULT_VARIABLE HAD_ERROR
       OUTPUT_VARIABLE CONFIG_OUTPUT)
     if(NOT HAD_ERROR)
-      string(STRIP "${CONFIG_OUTPUT}" LLVM_CMAKE_PATH_FROM_LLVM_CONFIG)
-      file(TO_CMAKE_PATH ${LLVM_CMAKE_PATH_FROM_LLVM_CONFIG} LLVM_CMAKE_PATH)
+      string(STRIP "${CONFIG_OUTPUT}" LLVM_CMAKE_DIR_FROM_LLVM_CONFIG)
+      file(TO_CMAKE_PATH ${LLVM_CMAKE_DIR_FROM_LLVM_CONFIG} LLVM_CMAKE_DIR)
     else()
       file(TO_CMAKE_PATH ${LLVM_BINARY_DIR} LLVM_BINARY_DIR_CMAKE_STYLE)
-      set(LLVM_CMAKE_PATH "${LLVM_BINARY_DIR_CMAKE_STYLE}/lib${LLVM_LIBDIR_SUFFIX}/cmake/llvm")
+      set(LLVM_CMAKE_DIR "${LLVM_BINARY_DIR_CMAKE_STYLE}/lib${LLVM_LIBDIR_SUFFIX}/cmake/llvm")
     endif()
 
-    set(LLVM_CMAKE_INCLUDE_FILE "${LLVM_CMAKE_PATH}/LLVMConfig.cmake")
+    set(LLVM_CMAKE_INCLUDE_FILE "${LLVM_CMAKE_DIR}/LLVMConfig.cmake")
     if (EXISTS "${LLVM_CMAKE_INCLUDE_FILE}")
-      list(APPEND CMAKE_MODULE_PATH "${LLVM_CMAKE_PATH}")
+      list(APPEND CMAKE_MODULE_PATH "${LLVM_CMAKE_DIR}")
       # Get some LLVM variables from LLVMConfig.
       include("${LLVM_CMAKE_INCLUDE_FILE}")
-      set(FOUND_LLVM_CMAKE_PATH TRUE)
+      set(FOUND_LLVM_CMAKE_DIR TRUE)
     else()
-      set(FOUND_LLVM_CMAKE_PATH FALSE)
+      set(FOUND_LLVM_CMAKE_DIR FALSE)
       message(WARNING "LLVM CMake path (${LLVM_CMAKE_INCLUDE_FILE}) reported by llvm-config does not exist")
     endif()
     unset(LLVM_CMAKE_INCLUDE_FILE)
@@ -403,7 +413,7 @@ macro(load_llvm_config)
                     "This will be treated as error in the future.")
   endif()
 
-  if (NOT FOUND_LLVM_CMAKE_PATH)
+  if (NOT FOUND_LLVM_CMAKE_DIR)
     # This configuration tries to configure without the prescence of `LLVMConfig.cmake`. It is
     # intended for testing purposes (generating the lit test suites) and will likely not support
     # a build of the runtimes in compiler-rt.
@@ -420,18 +430,12 @@ macro(construct_compiler_rt_default_triple)
     endif()
     set(COMPILER_RT_DEFAULT_TARGET_TRIPLE ${CMAKE_C_COMPILER_TARGET})
   else()
-    set(COMPILER_RT_DEFAULT_TARGET_TRIPLE ${TARGET_TRIPLE} CACHE STRING
+    set(COMPILER_RT_DEFAULT_TARGET_TRIPLE ${LLVM_TARGET_TRIPLE} CACHE STRING
           "Default triple for which compiler-rt runtimes will be built.")
   endif()
 
-  if(DEFINED COMPILER_RT_TEST_TARGET_TRIPLE)
-    # Backwards compatibility: this variable used to be called
-    # COMPILER_RT_TEST_TARGET_TRIPLE.
-    set(COMPILER_RT_DEFAULT_TARGET_TRIPLE ${COMPILER_RT_TEST_TARGET_TRIPLE})
-  endif()
-
-  string(REPLACE "-" ";" TARGET_TRIPLE_LIST ${COMPILER_RT_DEFAULT_TARGET_TRIPLE})
-  list(GET TARGET_TRIPLE_LIST 0 COMPILER_RT_DEFAULT_TARGET_ARCH)
+  string(REPLACE "-" ";" LLVM_TARGET_TRIPLE_LIST ${COMPILER_RT_DEFAULT_TARGET_TRIPLE})
+  list(GET LLVM_TARGET_TRIPLE_LIST 0 COMPILER_RT_DEFAULT_TARGET_ARCH)
 
   # Map various forms of the architecture names to the canonical forms
   # (as they are used by clang, see getArchNameForCompilerRTLib).
@@ -442,7 +446,7 @@ macro(construct_compiler_rt_default_triple)
 
   # Determine if test target triple is specified explicitly, and doesn't match the
   # default.
-  if(NOT COMPILER_RT_DEFAULT_TARGET_TRIPLE STREQUAL TARGET_TRIPLE)
+  if(NOT COMPILER_RT_DEFAULT_TARGET_TRIPLE STREQUAL LLVM_TARGET_TRIPLE)
     set(COMPILER_RT_HAS_EXPLICIT_DEFAULT_TARGET_TRIPLE TRUE)
   else()
     set(COMPILER_RT_HAS_EXPLICIT_DEFAULT_TARGET_TRIPLE FALSE)
@@ -492,18 +496,18 @@ endfunction()
 function(get_compiler_rt_install_dir arch install_dir)
   if(LLVM_ENABLE_PER_TARGET_RUNTIME_DIR AND NOT APPLE)
     get_compiler_rt_target(${arch} target)
-    set(${install_dir} ${COMPILER_RT_INSTALL_PATH}/lib/${target} PARENT_SCOPE)
+    set(${install_dir} ${COMPILER_RT_INSTALL_LIBRARY_DIR}/${target} PARENT_SCOPE)
   else()
-    set(${install_dir} ${COMPILER_RT_LIBRARY_INSTALL_DIR} PARENT_SCOPE)
+    set(${install_dir} ${COMPILER_RT_INSTALL_LIBRARY_DIR} PARENT_SCOPE)
   endif()
 endfunction()
 
 function(get_compiler_rt_output_dir arch output_dir)
   if(LLVM_ENABLE_PER_TARGET_RUNTIME_DIR AND NOT APPLE)
     get_compiler_rt_target(${arch} target)
-    set(${output_dir} ${COMPILER_RT_OUTPUT_DIR}/lib/${target} PARENT_SCOPE)
+    set(${output_dir} ${COMPILER_RT_OUTPUT_LIBRARY_DIR}/${target} PARENT_SCOPE)
   else()
-    set(${output_dir} ${COMPILER_RT_LIBRARY_OUTPUT_DIR} PARENT_SCOPE)
+    set(${output_dir} ${COMPILER_RT_OUTPUT_LIBRARY_DIR} PARENT_SCOPE)
   endif()
 endfunction()
 

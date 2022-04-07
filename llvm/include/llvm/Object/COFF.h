@@ -959,7 +959,7 @@ protected:
   bool isSectionData(DataRefImpl Sec) const override;
   bool isSectionBSS(DataRefImpl Sec) const override;
   bool isSectionVirtual(DataRefImpl Sec) const override;
-  bool isDebugSection(StringRef SectionName) const override;
+  bool isDebugSection(DataRefImpl Sec) const override;
   relocation_iterator section_rel_begin(DataRefImpl Sec) const override;
   relocation_iterator section_rel_end(DataRefImpl Sec) const override;
 
@@ -1079,13 +1079,15 @@ public:
 
   uint64_t getImageBase() const;
   Error getVaPtr(uint64_t VA, uintptr_t &Res) const;
-  Error getRvaPtr(uint32_t Rva, uintptr_t &Res) const;
+  Error getRvaPtr(uint32_t Rva, uintptr_t &Res,
+                  const char *ErrorContext = nullptr) const;
 
   /// Given an RVA base and size, returns a valid array of bytes or an error
   /// code if the RVA and size is not contained completely within a valid
   /// section.
   Error getRvaAndSizeAsBytes(uint32_t RVA, uint32_t Size,
-                             ArrayRef<uint8_t> &Contents) const;
+                             ArrayRef<uint8_t> &Contents,
+                             const char *ErrorContext = nullptr) const;
 
   Error getHintName(uint32_t Rva, uint16_t &Hint,
                               StringRef &Name) const;

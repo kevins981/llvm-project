@@ -36,8 +36,6 @@ class MCTargetStreamer;
 class StringRef;
 class Target;
 class Triple;
-class raw_ostream;
-class raw_pwrite_stream;
 
 namespace ARM_MC {
 std::string ParseARMTriple(const Triple &TT, StringRef CPU);
@@ -57,6 +55,9 @@ bool isLDMBaseRegInList(const Inst &MI) {
   return false;
 }
 
+uint64_t evaluateBranchTarget(const MCInstrDesc &InstDesc, uint64_t Addr,
+                              int64_t Imm);
+
 /// Create a ARM MCSubtargetInfo instance. This is exposed so Asm parser, etc.
 /// do not need to go through TargetRegistry.
 MCSubtargetInfo *createARMMCSubtargetInfo(const Triple &TT, StringRef CPU,
@@ -72,11 +73,9 @@ MCTargetStreamer *createARMObjectTargetStreamer(MCStreamer &S,
                                                 const MCSubtargetInfo &STI);
 
 MCCodeEmitter *createARMLEMCCodeEmitter(const MCInstrInfo &MCII,
-                                        const MCRegisterInfo &MRI,
                                         MCContext &Ctx);
 
 MCCodeEmitter *createARMBEMCCodeEmitter(const MCInstrInfo &MCII,
-                                        const MCRegisterInfo &MRI,
                                         MCContext &Ctx);
 
 MCAsmBackend *createARMLEAsmBackend(const Target &T, const MCSubtargetInfo &STI,

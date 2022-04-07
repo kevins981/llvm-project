@@ -159,6 +159,10 @@ static fpSymInitialize fSymInitialize;
 typedef BOOL (WINAPI *fpEnumerateLoadedModules)(HANDLE,PENUMLOADED_MODULES_CALLBACK64,PVOID);
 static fpEnumerateLoadedModules fEnumerateLoadedModules;
 
+static bool isDebugHelpInitialized() {
+  return fStackWalk64 && fSymInitialize && fSymSetOptions && fMiniDumpWriteDump;
+}
+
 static bool load64BitDebugHelp(void) {
   HMODULE hLib = ::LoadLibraryW(L"Dbghelp.dll");
   if (hLib) {
@@ -181,7 +185,7 @@ static bool load64BitDebugHelp(void) {
     fEnumerateLoadedModules = (fpEnumerateLoadedModules)
       ::GetProcAddress(hLib, "EnumerateLoadedModules64");
   }
-  return fStackWalk64 && fSymInitialize && fSymSetOptions && fMiniDumpWriteDump;
+  return isDebugHelpInitialized();
 }
 
 using namespace llvm;
@@ -296,6 +300,12 @@ static bool findModulesAndOffsets(void **StackTrace, int Depth,
 static void PrintStackTraceForThread(llvm::raw_ostream &OS, HANDLE hProcess,
                                      HANDLE hThread, STACKFRAME64 &StackFrame,
                                      CONTEXT *Context) {
+  // It's possible that DbgHelp.dll hasn't been loaded yet (e.g. if this
+  // function is called before the main program called `llvm::InitLLVM`).
+  // In this case just return, not stacktrace will be printed.
+  if (!isDebugHelpInitialized())
+    return;
+
   // Initialize the symbol handler.
   fSymSetOptions(SYMOPT_DEFERRED_LOADS | SYMOPT_LOAD_LINES);
   fSymInitialize(hProcess, NULL, TRUE);
@@ -773,7 +783,7 @@ WriteWindowsDumpFile(PMINIDUMP_EXCEPTION_INFORMATION ExceptionInfo) {
   // (GetDumpFolder will return false either if the key is NULL or if there is
   // no valid DumpFolder value at its location).
   bool ExplicitDumpDirectorySet = true;
-  SmallString<MAX_PATH> DumpDirectory(CrashDiagnosticsDirectory);
+  SmallString<MAX_PATH> DumpDirectory(*CrashDiagnosticsDirectory);
   if (DumpDirectory.empty())
     if (!GetDumpFolder(AppSpecificKey, DumpDirectory))
       if (!GetDumpFolder(DefaultLocalDumpsKey, DumpDirectory))

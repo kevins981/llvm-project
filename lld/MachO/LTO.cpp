@@ -13,10 +13,13 @@
 #include "Symbols.h"
 #include "Target.h"
 
-#include "lld/Common/ErrorHandler.h"
+#include "lld/Common/Args.h"
+#include "lld/Common/CommonLinkerContext.h"
 #include "lld/Common/Strings.h"
 #include "lld/Common/TargetOptionsCommandFlags.h"
+#include "llvm/LTO/Config.h"
 #include "llvm/LTO/LTO.h"
+#include "llvm/Support/Caching.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/raw_ostream.h"
@@ -34,12 +37,14 @@ static lto::Config createConfig() {
   c.CodeModel = getCodeModelFromCMModel();
   c.CPU = getCPUStr();
   c.MAttrs = getMAttrs();
-  c.UseNewPM = config->ltoNewPassManager;
+  c.DiagHandler = diagnosticHandler;
   c.PreCodeGenPassesHook = [](legacy::PassManager &pm) {
     pm.add(createObjCARCContractPass());
   };
   c.TimeTraceEnabled = config->timeTraceEnabled;
   c.TimeTraceGranularity = config->timeTraceGranularity;
+  c.OptLevel = config->ltoo;
+  c.CGOptLevel = args::getCGOptLevel(config->ltoo);
   if (config->saveTemps)
     checkError(c.addSaveTemps(config->outputFile.str() + ".",
                               /*UseInputModulePath=*/true));
@@ -58,6 +63,8 @@ void BitcodeCompiler::add(BitcodeFile &f) {
   resols.reserve(objSyms.size());
 
   // Provide a resolution to the LTO API for each symbol.
+  bool exportDynamic =
+      config->outputType != MH_EXECUTE || config->exportDynamic;
   auto symIt = f.symbols.begin();
   for (const lto::InputFile::Symbol &objSym : objSyms) {
     resols.emplace_back();
@@ -71,11 +78,18 @@ void BitcodeCompiler::add(BitcodeFile &f) {
     // be removed.
     r.Prevailing = !objSym.isUndefined() && sym->getFile() == &f;
 
-    // FIXME: What about other output types? And we can probably be less
-    // restrictive with -flat_namespace, but it's an infrequent use case.
-    r.VisibleToRegularObj = config->outputType != MH_EXECUTE ||
-                            config->namespaceKind == NamespaceKind::flat ||
-                            sym->isUsedInRegularObj;
+    if (const auto *defined = dyn_cast<Defined>(sym)) {
+      r.ExportDynamic =
+          defined->isExternal() && !defined->privateExtern && exportDynamic;
+      r.FinalDefinitionInLinkageUnit =
+          !defined->isExternalWeakDef() && !defined->interposable;
+    } else if (const auto *common = dyn_cast<CommonSymbol>(sym)) {
+      r.ExportDynamic = !common->privateExtern && exportDynamic;
+      r.FinalDefinitionInLinkageUnit = true;
+    }
+
+    r.VisibleToRegularObj =
+        sym->isUsedInRegularObj || (r.Prevailing && r.ExportDynamic);
 
     // Un-define the symbol so that we don't get duplicate symbol errors when we
     // load the ObjFile emitted by LTO compilation.
@@ -93,11 +107,28 @@ void BitcodeCompiler::add(BitcodeFile &f) {
 std::vector<ObjFile *> BitcodeCompiler::compile() {
   unsigned maxTasks = ltoObj->getMaxTasks();
   buf.resize(maxTasks);
+  files.resize(maxTasks);
 
-  checkError(ltoObj->run([&](size_t task) {
-    return std::make_unique<lto::NativeObjectStream>(
-        std::make_unique<raw_svector_ostream>(buf[task]));
-  }));
+  // The -cache_path_lto option specifies the path to a directory in which
+  // to cache native object files for ThinLTO incremental builds. If a path was
+  // specified, configure LTO to use it as the cache directory.
+  FileCache cache;
+  if (!config->thinLTOCacheDir.empty())
+    cache =
+        check(localCache("ThinLTO", "Thin", config->thinLTOCacheDir,
+                         [&](size_t task, std::unique_ptr<MemoryBuffer> mb) {
+                           files[task] = std::move(mb);
+                         }));
+
+  checkError(ltoObj->run(
+      [&](size_t task) {
+        return std::make_unique<CachedFileStream>(
+            std::make_unique<raw_svector_ostream>(buf[task]));
+      },
+      cache));
+
+  if (!config->thinLTOCacheDir.empty())
+    pruneCache(config->thinLTOCacheDir, config->thinLTOCachePolicy);
 
   if (config->saveTemps) {
     if (!buf[0].empty())
@@ -124,8 +155,10 @@ std::vector<ObjFile *> BitcodeCompiler::compile() {
       modTime = getModTime(filePath);
     }
     ret.push_back(make<ObjFile>(
-        MemoryBufferRef(buf[i], saver.save(filePath.str())), modTime, ""));
+        MemoryBufferRef(buf[i], saver().save(filePath.str())), modTime, ""));
   }
-
+  for (std::unique_ptr<MemoryBuffer> &file : files)
+    if (file)
+      ret.push_back(make<ObjFile>(*file, 0, ""));
   return ret;
 }

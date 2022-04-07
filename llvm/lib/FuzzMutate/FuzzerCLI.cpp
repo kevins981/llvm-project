@@ -11,14 +11,13 @@
 #include "llvm/ADT/Triple.h"
 #include "llvm/Bitcode/BitcodeReader.h"
 #include "llvm/Bitcode/BitcodeWriter.h"
-#include "llvm/IR/LLVMContext.h"
+#include "llvm/IR/Verifier.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Compiler.h"
 #include "llvm/Support/Error.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/raw_ostream.h"
-#include "llvm/IR/Verifier.h"
 
 using namespace llvm;
 
@@ -88,7 +87,7 @@ void llvm::handleExecNameEncodedOptimizerOpts(StringRef ExecName) {
     } else if (Opt == "earlycse") {
       Args.push_back("-passes=early-cse");
     } else if (Opt == "simplifycfg") {
-      Args.push_back("-passes=simplify-cfg");
+      Args.push_back("-passes=simplifycfg");
     } else if (Opt == "gvn") {
       Args.push_back("-passes=gvn");
     } else if (Opt == "sccp") {
@@ -101,7 +100,7 @@ void llvm::handleExecNameEncodedOptimizerOpts(StringRef ExecName) {
     } else if (Opt == "loop_rotate") {
       Args.push_back("-passes=loop(rotate)");
     } else if (Opt == "loop_unswitch") {
-      Args.push_back("-passes=loop(unswitch)");
+      Args.push_back("-passes=loop(simple-loop-unswitch)");
     } else if (Opt == "loop_unroll") {
       Args.push_back("-passes=unroll");
     } else if (Opt == "loop_vectorize") {

@@ -22,11 +22,12 @@
 #include "llvm/MC/MCRegisterInfo.h"
 #include "llvm/MC/MCSectionELF.h"
 #include "llvm/MC/MCSectionMachO.h"
+#include "llvm/MC/MCSubtargetInfo.h"
 #include "llvm/MC/MCTargetOptions.h"
 #include "llvm/MC/MCValue.h"
+#include "llvm/MC/TargetRegistry.h"
 #include "llvm/Support/EndianStream.h"
 #include "llvm/Support/ErrorHandling.h"
-#include "llvm/Support/TargetRegistry.h"
 using namespace llvm;
 
 namespace {
@@ -92,7 +93,8 @@ public:
                             const MCAsmLayout &Layout) const override;
   void relaxInstruction(MCInst &Inst,
                         const MCSubtargetInfo &STI) const override;
-  bool writeNopData(raw_ostream &OS, uint64_t Count) const override;
+  bool writeNopData(raw_ostream &OS, uint64_t Count,
+                    const MCSubtargetInfo *STI) const override;
 
   unsigned getFixupKindContainereSizeInBytes(unsigned Kind) const;
 
@@ -159,8 +161,11 @@ static uint64_t adjustFixupValue(const MCFixup &Fixup, const MCValue &Target,
     return AdrImmBits(Value & 0x1fffffULL);
   case AArch64::fixup_aarch64_pcrel_adrp_imm21:
     assert(!IsResolved);
-    if (TheTriple.isOSBinFormatCOFF())
+    if (TheTriple.isOSBinFormatCOFF()) {
+      if (!isInt<21>(SignedValue))
+        Ctx.reportError(Fixup.getLoc(), "fixup value out of range");
       return AdrImmBits(Value & 0x1fffffULL);
+    }
     return AdrImmBits((Value & 0x1fffff000ULL) >> 12);
   case AArch64::fixup_aarch64_ldr_pcrel_imm19:
   case AArch64::fixup_aarch64_pcrel_branch19:
@@ -456,7 +461,8 @@ void AArch64AsmBackend::relaxInstruction(MCInst &Inst,
   llvm_unreachable("AArch64AsmBackend::relaxInstruction() unimplemented");
 }
 
-bool AArch64AsmBackend::writeNopData(raw_ostream &OS, uint64_t Count) const {
+bool AArch64AsmBackend::writeNopData(raw_ostream &OS, uint64_t Count,
+                                     const MCSubtargetInfo *STI) const {
   // If the count is not 4-byte aligned, we must be writing data into the text
   // section (otherwise we have unaligned instructions, and thus have far
   // bigger problems), so just write zeros instead.
@@ -491,13 +497,6 @@ bool AArch64AsmBackend::shouldForceRelocation(const MCAssembler &Asm,
   if (Kind == AArch64::fixup_aarch64_pcrel_adrp_imm21)
     return true;
 
-  AArch64MCExpr::VariantKind RefKind =
-      static_cast<AArch64MCExpr::VariantKind>(Target.getRefKind());
-  AArch64MCExpr::VariantKind SymLoc = AArch64MCExpr::getSymbolLoc(RefKind);
-  // LDR GOT relocations need a relocation
-  if (Kind == AArch64::fixup_aarch64_ldr_pcrel_imm19 &&
-      SymLoc == AArch64MCExpr::VK_GOT)
-    return true;
   return false;
 }
 
@@ -622,7 +621,8 @@ public:
         break;
       }
       case MCCFIInstruction::OpDefCfaOffset: {
-        assert(StackSize == 0 && "We already have the CFA offset!");
+        if (StackSize != 0)
+          return CU::UNWIND_ARM64_MODE_DWARF;
         StackSize = std::abs(Inst.getOffset());
         break;
       }

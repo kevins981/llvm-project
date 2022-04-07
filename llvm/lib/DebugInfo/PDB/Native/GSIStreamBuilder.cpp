@@ -14,7 +14,7 @@
 
 #include "llvm/DebugInfo/PDB/Native/GSIStreamBuilder.h"
 #include "llvm/DebugInfo/CodeView/RecordName.h"
-#include "llvm/DebugInfo/CodeView/SymbolDeserializer.h"
+#include "llvm/DebugInfo/CodeView/RecordSerialization.h"
 #include "llvm/DebugInfo/CodeView/SymbolRecord.h"
 #include "llvm/DebugInfo/CodeView/SymbolSerializer.h"
 #include "llvm/DebugInfo/MSF/MSFBuilder.h"
@@ -22,6 +22,7 @@
 #include "llvm/DebugInfo/MSF/MappedBlockStream.h"
 #include "llvm/DebugInfo/PDB/Native/GlobalsStream.h"
 #include "llvm/DebugInfo/PDB/Native/Hash.h"
+#include "llvm/DebugInfo/PDB/Native/RawTypes.h"
 #include "llvm/Support/BinaryItemStream.h"
 #include "llvm/Support/BinaryStreamWriter.h"
 #include "llvm/Support/Parallel.h"
@@ -163,7 +164,7 @@ static int gsiRecordCmp(StringRef S1, StringRef S2) {
     return memcmp(S1.data(), S2.data(), LS);
 
   // Both strings are ascii, perform a case-insensitive comparison.
-  return S1.compare_lower(S2.data());
+  return S1.compare_insensitive(S2.data());
 }
 
 void GSIStreamBuilder::finalizePublicBuckets() {
@@ -286,7 +287,7 @@ GSIStreamBuilder::GSIStreamBuilder(msf::MSFBuilder &Msf)
     : Msf(Msf), PSH(std::make_unique<GSIHashStreamBuilder>()),
       GSH(std::make_unique<GSIHashStreamBuilder>()) {}
 
-GSIStreamBuilder::~GSIStreamBuilder() {}
+GSIStreamBuilder::~GSIStreamBuilder() = default;
 
 uint32_t GSIStreamBuilder::calculatePublicsHashStreamSize() const {
   uint32_t Size = 0;

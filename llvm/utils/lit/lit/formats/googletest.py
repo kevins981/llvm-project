@@ -1,5 +1,6 @@
 from __future__ import absolute_import
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -53,11 +54,12 @@ class GoogleTest(TestFormat):
             yield 'failed_to_discover_tests_from_gtest'
             return
 
+        upstream_prefix = re.compile('Running main\(\) from .*gtest_main\.cc')
         nested_tests = []
         for ln in output.splitlines(False):  # Don't keep newlines.
             ln = lit.util.to_string(ln)
 
-            if 'Running main() from gtest_main.cc' in ln:
+            if upstream_prefix.fullmatch(ln):
                 # Upstream googletest prints this to stdout prior to running
                 # tests. LLVM removed that print statement in r61540, but we
                 # handle it here in case upstream googletest is being used.
@@ -122,27 +124,28 @@ class GoogleTest(TestFormat):
         if litConfig.noExecute:
             return lit.Test.PASS, ''
 
+        header = f"Script:\n--\n{' '.join(cmd)}\n--\n"
+
         try:
             out, err, exitCode = lit.util.executeCommand(
                 cmd, env=test.config.environment,
                 timeout=litConfig.maxIndividualTestTime)
         except lit.util.ExecuteCommandTimeoutException:
             return (lit.Test.TIMEOUT,
-                    'Reached timeout of {} seconds'.format(
-                        litConfig.maxIndividualTestTime)
-                   )
+                    f'{header}Reached timeout of '
+                    f'{litConfig.maxIndividualTestTime} seconds')
 
         if exitCode:
-            return lit.Test.FAIL, out + err
+            return lit.Test.FAIL, header + out + err
 
         if '[  SKIPPED ] 1 test,' in out:
             return lit.Test.SKIPPED, ''
 
         passing_test_line = '[  PASSED  ] 1 test.'
         if passing_test_line not in out:
-            msg = ('Unable to find %r in gtest output:\n\n%s%s' %
-                   (passing_test_line, out, err))
-            return lit.Test.UNRESOLVED, msg
+            return (lit.Test.UNRESOLVED,
+                    f'{header}Unable to find {passing_test_line} '
+                    f'in gtest output:\n\n{out}{err}')
 
         return lit.Test.PASS,''
 

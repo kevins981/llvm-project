@@ -282,7 +282,7 @@ bool MipsSEDAGToDAGISel::selectAddrFrameIndexOffset(
     SDValue Addr, SDValue &Base, SDValue &Offset, unsigned OffsetBits,
     unsigned ShiftAmount = 0) const {
   if (CurDAG->isBaseWithConstantOffset(Addr)) {
-    ConstantSDNode *CN = dyn_cast<ConstantSDNode>(Addr.getOperand(1));
+    auto *CN = cast<ConstantSDNode>(Addr.getOperand(1));
     if (isIntN(OffsetBits + ShiftAmount, CN->getSExtValue())) {
       EVT ValTy = Addr.getValueType();
 
@@ -964,7 +964,7 @@ bool MipsSEDAGToDAGISel::trySelect(SDNode *Node) {
   // match the instruction.
   case MipsISD::Ins: {
 
-    // Sanity checking for the node operands.
+    // Validating the node operands.
     if (Node->getValueType(0) != MVT::i32 && Node->getValueType(0) != MVT::i64)
       return false;
 
@@ -1027,12 +1027,13 @@ bool MipsSEDAGToDAGISel::trySelect(SDNode *Node) {
     }
 
     SDNode *Rdhwr =
-        CurDAG->getMachineNode(RdhwrOpc, DL, Node->getValueType(0),
+        CurDAG->getMachineNode(RdhwrOpc, DL, Node->getValueType(0), MVT::Glue,
                                CurDAG->getRegister(Mips::HWR29, MVT::i32),
                                CurDAG->getTargetConstant(0, DL, MVT::i32));
     SDValue Chain = CurDAG->getCopyToReg(CurDAG->getEntryNode(), DL, DestReg,
-                                         SDValue(Rdhwr, 0));
-    SDValue ResNode = CurDAG->getCopyFromReg(Chain, DL, DestReg, PtrVT);
+                                         SDValue(Rdhwr, 0), SDValue(Rdhwr, 1));
+    SDValue ResNode = CurDAG->getCopyFromReg(Chain, DL, DestReg, PtrVT,
+                                             Chain.getValue(1));
     ReplaceNode(Node, ResNode.getNode());
     return true;
   }

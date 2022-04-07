@@ -1,5 +1,9 @@
 // RUN: %libomptarget-compilexx-run-and-check-generic
 
+// Wrong results on amdgpu
+// XFAIL: amdgcn-amd-amdhsa
+// XFAIL: amdgcn-amd-amdhsa-newDriver
+
 #include <stdio.h>
 #include <stdint.h>
 

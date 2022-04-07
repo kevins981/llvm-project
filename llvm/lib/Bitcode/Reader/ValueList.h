@@ -21,19 +21,14 @@
 namespace llvm {
 
 class Constant;
+class Error;
 class LLVMContext;
 class Type;
 class Value;
 
 class BitcodeReaderValueList {
-  std::vector<WeakTrackingVH> ValuePtrs;
-
-  /// Struct containing fully-specified copies of the type of each
-  /// value. When pointers are opaque, this will be contain non-opaque
-  /// variants so that restructuring instructions can determine their
-  /// type correctly even if being loaded from old bitcode where some
-  /// types are implicit.
-  std::vector<Type *> FullTypes;
+  /// Maps Value ID to pair of Value* and Type ID.
+  std::vector<std::pair<WeakTrackingVH, unsigned>> ValuePtrs;
 
   /// As we resolve forward-referenced constants, we add information about them
   /// to this vector.  This allows us to resolve them in bulk instead of
@@ -64,41 +59,41 @@ public:
   unsigned size() const { return ValuePtrs.size(); }
   void resize(unsigned N) {
     ValuePtrs.resize(N);
-    FullTypes.resize(N);
   }
-  void push_back(Value *V, Type *Ty) {
-    ValuePtrs.emplace_back(V);
-    FullTypes.emplace_back(Ty);
+  void push_back(Value *V, unsigned TypeID) {
+    ValuePtrs.emplace_back(V, TypeID);
   }
 
   void clear() {
     assert(ResolveConstants.empty() && "Constants not resolved?");
     ValuePtrs.clear();
-    FullTypes.clear();
   }
 
   Value *operator[](unsigned i) const {
     assert(i < ValuePtrs.size());
-    return ValuePtrs[i];
+    return ValuePtrs[i].first;
   }
 
-  Value *back() const { return ValuePtrs.back(); }
+  unsigned getTypeID(unsigned ValNo) const {
+    assert(ValNo < ValuePtrs.size());
+    return ValuePtrs[ValNo].second;
+  }
+
+  Value *back() const { return ValuePtrs.back().first; }
   void pop_back() {
     ValuePtrs.pop_back();
-    FullTypes.pop_back();
   }
   bool empty() const { return ValuePtrs.empty(); }
 
   void shrinkTo(unsigned N) {
     assert(N <= size() && "Invalid shrinkTo request!");
     ValuePtrs.resize(N);
-    FullTypes.resize(N);
   }
 
-  Constant *getConstantFwdRef(unsigned Idx, Type *Ty);
-  Value *getValueFwdRef(unsigned Idx, Type *Ty, Type **FullTy = nullptr);
+  Constant *getConstantFwdRef(unsigned Idx, Type *Ty, unsigned TyID);
+  Value *getValueFwdRef(unsigned Idx, Type *Ty, unsigned TyID);
 
-  void assignValue(Value *V, unsigned Idx, Type *FullTy);
+  Error assignValue(unsigned Idx, Value *V, unsigned TypeID);
 
   /// Once all constants are read, this method bulk resolves any forward
   /// references.

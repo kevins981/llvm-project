@@ -69,6 +69,7 @@ class VectorType;
     CALL_PRED,   // Function call that's predicable.
     CALL_NOLINK, // Function call with branch not branch-and-link.
     tSECALL,     // CMSE non-secure function call.
+    t2CALL_BTI,  // Thumb function call followed by BTI instruction.
     BRCOND,      // Conditional branch.
     BR_JT,       // Jumptable branch.
     BR2_JT,      // Jumptable branch (2 level - jumptable entry is a jump).
@@ -138,6 +139,10 @@ class VectorType;
 
     PREDICATE_CAST,  // Predicate cast for MVE i1 types
     VECTOR_REG_CAST, // Reinterpret the current contents of a vector register
+
+    MVESEXT,  // Legalization aids for extending a vector into two/four vectors.
+    MVEZEXT,  //  or truncating two/four vectors into one. Eventually becomes
+    MVETRUNC, //  stack store/load sequence, if not optimized to anything else.
 
     VCMP,  // Vector compare.
     VCMPZ, // Vector compare to zero.
@@ -277,6 +282,10 @@ class VectorType;
     QSUB8b,
     QADD16b,
     QSUB16b,
+    UQADD8b,
+    UQSUB8b,
+    UQADD16b,
+    UQSUB16b,
 
     // Operands of the standard BUILD_VECTOR node are not legalized, which
     // is fine if BUILD_VECTORs are always lowered to shuffles or other
@@ -330,6 +339,9 @@ class VectorType;
     VLD2DUP_UPD,
     VLD3DUP_UPD,
     VLD4DUP_UPD,
+    VLD1x2_UPD,
+    VLD1x3_UPD,
+    VLD1x4_UPD,
 
     // NEON stores with post-increment base updates:
     VST1_UPD,
@@ -414,6 +426,8 @@ class VectorType;
     SDValue PerformBRCONDCombine(SDNode *N, SelectionDAG &DAG) const;
     SDValue PerformCMOVToBFICombine(SDNode *N, SelectionDAG &DAG) const;
     SDValue PerformIntrinsicCombine(SDNode *N, DAGCombinerInfo &DCI) const;
+    SDValue PerformMVEExtCombine(SDNode *N, DAGCombinerInfo &DCI) const;
+    SDValue PerformMVETruncCombine(SDNode *N, DAGCombinerInfo &DCI) const;
     SDValue PerformDAGCombine(SDNode *N, DAGCombinerInfo &DCI) const override;
 
     bool SimplifyDemandedBitsForTargetNode(SDValue Op,
@@ -612,7 +626,8 @@ class VectorType;
     /// Returns true if an argument of type Ty needs to be passed in a
     /// contiguous block of registers in calling convention CallConv.
     bool functionArgumentNeedsConsecutiveRegisters(
-        Type *Ty, CallingConv::ID CallConv, bool isVarArg) const override;
+        Type *Ty, CallingConv::ID CallConv, bool isVarArg,
+        const DataLayout &DL) const override;
 
     /// If a physical register, this returns the register that receives the
     /// exception address on entry to an EH pad.
@@ -624,17 +639,18 @@ class VectorType;
     Register
     getExceptionSelectorRegister(const Constant *PersonalityFn) const override;
 
-    Instruction *makeDMB(IRBuilder<> &Builder, ARM_MB::MemBOpt Domain) const;
-    Value *emitLoadLinked(IRBuilder<> &Builder, Value *Addr,
+    Instruction *makeDMB(IRBuilderBase &Builder, ARM_MB::MemBOpt Domain) const;
+    Value *emitLoadLinked(IRBuilderBase &Builder, Type *ValueTy, Value *Addr,
                           AtomicOrdering Ord) const override;
-    Value *emitStoreConditional(IRBuilder<> &Builder, Value *Val,
-                                Value *Addr, AtomicOrdering Ord) const override;
+    Value *emitStoreConditional(IRBuilderBase &Builder, Value *Val, Value *Addr,
+                                AtomicOrdering Ord) const override;
 
-    void emitAtomicCmpXchgNoStoreLLBalance(IRBuilder<> &Builder) const override;
+    void
+    emitAtomicCmpXchgNoStoreLLBalance(IRBuilderBase &Builder) const override;
 
-    Instruction *emitLeadingFence(IRBuilder<> &Builder, Instruction *Inst,
+    Instruction *emitLeadingFence(IRBuilderBase &Builder, Instruction *Inst,
                                   AtomicOrdering Ord) const override;
-    Instruction *emitTrailingFence(IRBuilder<> &Builder, Instruction *Inst,
+    Instruction *emitTrailingFence(IRBuilderBase &Builder, Instruction *Inst,
                                    AtomicOrdering Ord) const override;
 
     unsigned getMaxSupportedInterleaveFactor() const override;
@@ -649,7 +665,8 @@ class VectorType;
     bool shouldInsertFencesForAtomic(const Instruction *I) const override;
     TargetLoweringBase::AtomicExpansionKind
     shouldExpandAtomicLoadInIR(LoadInst *LI) const override;
-    bool shouldExpandAtomicStoreInIR(StoreInst *SI) const override;
+    TargetLoweringBase::AtomicExpansionKind
+    shouldExpandAtomicStoreInIR(StoreInst *SI) const override;
     TargetLoweringBase::AtomicExpansionKind
     shouldExpandAtomicRMWInIR(AtomicRMWInst *AI) const override;
     TargetLoweringBase::AtomicExpansionKind
@@ -665,7 +682,7 @@ class VectorType;
                                    unsigned &Cost) const override;
 
     bool canMergeStoresTo(unsigned AddressSpace, EVT MemVT,
-                          const SelectionDAG &DAG) const override {
+                          const MachineFunction &MF) const override {
       // Do not merge to larger than i32.
       return (MemVT.getSizeInBits() <= 32);
     }
@@ -697,6 +714,9 @@ class VectorType;
                                       Align Alignment,
                                       const DataLayout &DL) const;
 
+    bool isMulAddWithConstProfitable(SDValue AddNode,
+                                     SDValue ConstNode) const override;
+
     bool alignLoopsWithOptSize() const override;
 
     /// Returns the number of interleaved accesses that will be generated when
@@ -708,7 +728,7 @@ class VectorType;
 
     /// Return the correct alignment for the current calling convention.
     Align getABIAlignmentForCallingConv(Type *ArgTy,
-                                        DataLayout DL) const override;
+                                        const DataLayout &DL) const override;
 
     bool isDesirableToCommuteWithShift(const SDNode *N,
                                        CombineLevel Level) const override;
@@ -717,6 +737,8 @@ class VectorType;
                                            CombineLevel Level) const override;
 
     bool preferIncOfAddToSubOfNot(EVT VT) const override;
+
+    bool shouldConvertFpToSat(unsigned Op, EVT FPVT, EVT VT) const override;
 
   protected:
     std::pair<const TargetRegisterClass *, uint8_t>
@@ -741,7 +763,7 @@ class VectorType;
 
     bool HasStandaloneRem = true;
 
-    void addTypeForNEON(MVT VT, MVT PromotedLdStVT, MVT PromotedBitwiseVT);
+    void addTypeForNEON(MVT VT, MVT PromotedLdStVT);
     void addDRTypeForNEON(MVT VT);
     void addQRTypeForNEON(MVT VT);
     std::pair<SDValue, SDValue> getARMXALUOOp(SDValue Op, SelectionDAG &DAG, SDValue &ARMcc) const;
@@ -753,7 +775,8 @@ class VectorType;
                           CCValAssign &VA, CCValAssign &NextVA,
                           SDValue &StackPtr,
                           SmallVectorImpl<SDValue> &MemOpChains,
-                          ISD::ArgFlagsTy Flags) const;
+                          bool IsTailCall,
+                          int SPDiff) const;
     SDValue GetF64FormalArgument(CCValAssign &VA, CCValAssign &NextVA,
                                  SDValue &Root, SelectionDAG &DAG,
                                  const SDLoc &dl) const;
@@ -762,10 +785,10 @@ class VectorType;
                                             bool isVarArg) const;
     CCAssignFn *CCAssignFnForNode(CallingConv::ID CC, bool Return,
                                   bool isVarArg) const;
-    SDValue LowerMemOpCallTo(SDValue Chain, SDValue StackPtr, SDValue Arg,
-                             const SDLoc &dl, SelectionDAG &DAG,
-                             const CCValAssign &VA,
-                             ISD::ArgFlagsTy Flags) const;
+    std::pair<SDValue, MachinePointerInfo>
+    computeAddrForCallArg(const SDLoc &dl, SelectionDAG &DAG,
+                          const CCValAssign &VA, SDValue StackPtr,
+                          bool IsTailCall, int SPDiff) const;
     SDValue LowerEH_SJLJ_SETJMP(SDValue Op, SelectionDAG &DAG) const;
     SDValue LowerEH_SJLJ_LONGJMP(SDValue Op, SelectionDAG &DAG) const;
     SDValue LowerEH_SJLJ_SETUP_DISPATCH(SDValue Op, SelectionDAG &DAG) const;
@@ -823,8 +846,6 @@ class VectorType;
     SDValue LowerFP_TO_INT(SDValue Op, SelectionDAG &DAG) const;
     SDValue LowerINT_TO_FP(SDValue Op, SelectionDAG &DAG) const;
     SDValue LowerFSETCC(SDValue Op, SelectionDAG &DAG) const;
-    void lowerABS(SDNode *N, SmallVectorImpl<SDValue> &Results,
-                  SelectionDAG &DAG) const;
     void LowerLOAD(SDNode *N, SmallVectorImpl<SDValue> &Results,
                    SelectionDAG &DAG) const;
 

@@ -1,5 +1,5 @@
-// RUN: %clang_cc1 -std=c11 -fsyntax-only -verify %s
-// RUN: %clang_cc1 -std=c99 -pedantic -fsyntax-only -verify=expected,ext %s
+// RUN: %clang_cc1 -std=c11 -fsyntax-only -Wno-strict-prototypes -verify %s
+// RUN: %clang_cc1 -std=c99 -pedantic -fsyntax-only -Wno-strict-prototypes -verify=expected,ext %s
 
 void g(void);
 
@@ -7,7 +7,7 @@ void foo(int n) {
   (void) _Generic(0, // ext-warning {{'_Generic' is a C11 extension}}
       struct A: 0, // expected-error {{type 'struct A' in generic association incomplete}}
       void(): 0,   // expected-error {{type 'void ()' in generic association not an object type}}
-      int[n]: 0);  // expected-error {{type 'int [n]' in generic association is a variably modified type}}
+      int[n]: 0);  // expected-error {{type 'int[n]' in generic association is a variably modified type}}
 
   (void) _Generic(0, // ext-warning {{'_Generic' is a C11 extension}}
       void (*)():     0,  // expected-note {{compatible type 'void (*)()' specified here}}

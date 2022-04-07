@@ -8,7 +8,7 @@
 
 #include "llvm/MC/MCAsmBackend.h"
 #include "llvm/ADT/None.h"
-#include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/STLArrayExtras.h"
 #include "llvm/MC/MCELFObjectWriter.h"
 #include "llvm/MC/MCFixupKindInfo.h"
 #include "llvm/MC/MCMachObjectWriter.h"
@@ -95,16 +95,7 @@ const MCFixupKindInfo &MCAsmBackend::getFixupKindInfo(MCFixupKind Kind) const {
       {"FK_SecRel_2", 0, 16, 0},
       {"FK_SecRel_4", 0, 32, 0},
       {"FK_SecRel_8", 0, 64, 0},
-      {"FK_Data_Add_1", 0, 8, 0},
-      {"FK_Data_Add_2", 0, 16, 0},
-      {"FK_Data_Add_4", 0, 32, 0},
-      {"FK_Data_Add_8", 0, 64, 0},
-      {"FK_Data_Add_6b", 0, 6, 0},
-      {"FK_Data_Sub_1", 0, 8, 0},
-      {"FK_Data_Sub_2", 0, 16, 0},
-      {"FK_Data_Sub_4", 0, 32, 0},
-      {"FK_Data_Sub_8", 0, 64, 0},
-      {"FK_Data_Sub_6b", 0, 6, 0}};
+  };
 
   assert((size_t)Kind <= array_lengthof(Builtins) && "Unknown fixup kind");
   return Builtins[Kind];

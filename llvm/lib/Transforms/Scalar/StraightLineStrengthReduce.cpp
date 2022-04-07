@@ -68,7 +68,6 @@
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/GetElementPtrTypeIterator.h"
 #include "llvm/IR/IRBuilder.h"
-#include "llvm/IR/InstrTypes.h"
 #include "llvm/IR/Instruction.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Module.h"
@@ -607,7 +606,7 @@ Value *StraightLineStrengthReduce::emitBump(const Candidate &Basis,
   if (IndexOffset == 1)
     return C.Stride;
   // Common case 2: if (i' - i) is -1, Bump = -S.
-  if (IndexOffset.isAllOnesValue())
+  if (IndexOffset.isAllOnes())
     return Builder.CreateNeg(C.Stride);
 
   // Otherwise, Bump = (i' - i) * sext/trunc(S). Note that (i' - i) and S may
@@ -620,7 +619,7 @@ Value *StraightLineStrengthReduce::emitBump(const Candidate &Basis,
     ConstantInt *Exponent = ConstantInt::get(DeltaType, IndexOffset.logBase2());
     return Builder.CreateShl(ExtendedStride, Exponent);
   }
-  if ((-IndexOffset).isPowerOf2()) {
+  if (IndexOffset.isNegatedPowerOf2()) {
     // If (i - i') is a power of 2, Bump = -sext/trunc(S) << log(i' - i).
     ConstantInt *Exponent =
         ConstantInt::get(DeltaType, (-IndexOffset).logBase2());

@@ -5,7 +5,7 @@ endif()
 
 function(add_math_entrypoint_object name)
   # We prefer machine specific implementation if available. Hence we check
-  # that first and retrun early if we are able to add an alias target for the
+  # that first and return early if we are able to add an alias target for the
   # machine specific implementation.
   get_fq_target_name("${LIBC_TARGET_ARCHITECTURE}.${name}" fq_machine_specific_target_name)
   if(TARGET ${fq_machine_specific_target_name})
@@ -47,9 +47,10 @@ add_entrypoint_object(
   HDRS
     fmaf.h
   DEPENDS
-    libc.utils.FPUtil.fputil
+    libc.src.__support.FPUtil.fputil
   COMPILE_OPTIONS
     -O2
+    -mfma
 )
 
 add_entrypoint_object(
@@ -59,9 +60,10 @@ add_entrypoint_object(
   HDRS
     fma.h
   DEPENDS
-    libc.utils.FPUtil.fputil
+    libc.src.__support.FPUtil.fputil
   COMPILE_OPTIONS
     -O2
+    -mfma
 )
 
 add_math_entrypoint_object(ceil)
@@ -78,6 +80,8 @@ add_math_entrypoint_object(cosf)
 add_math_entrypoint_object(expf)
 
 add_math_entrypoint_object(exp2f)
+
+add_math_entrypoint_object(expm1f)
 
 add_math_entrypoint_object(fabs)
 add_math_entrypoint_object(fabsf)
@@ -113,6 +117,14 @@ add_math_entrypoint_object(ilogbl)
 add_math_entrypoint_object(ldexp)
 add_math_entrypoint_object(ldexpf)
 add_math_entrypoint_object(ldexpl)
+
+add_math_entrypoint_object(log10f)
+
+add_math_entrypoint_object(log1pf)
+
+add_math_entrypoint_object(log2f)
+
+add_math_entrypoint_object(logf)
 
 add_math_entrypoint_object(logb)
 add_math_entrypoint_object(logbf)

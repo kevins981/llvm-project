@@ -12,8 +12,6 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/Transforms/Utils/FunctionImportUtils.h"
-#include "llvm/IR/Constants.h"
-#include "llvm/IR/InstIterator.h"
 using namespace llvm;
 
 /// Checks if we should import SGV as a definition, otherwise import as a
@@ -276,7 +274,9 @@ void FunctionImportGlobalProcessing::processGlobalForThinLTO(GlobalValue &GV) {
   // When ClearDSOLocalOnDeclarations is true, clear dso_local if GV is
   // converted to a declaration, to disable direct access. Don't do this if GV
   // is implicitly dso_local due to a non-default visibility.
-  if (ClearDSOLocalOnDeclarations && GV.isDeclarationForLinker() &&
+  if (ClearDSOLocalOnDeclarations &&
+      (GV.isDeclarationForLinker() ||
+       (isPerformingImport() && !doImportAsDefinition(&GV))) &&
       !GV.isImplicitDSOLocal()) {
     GV.setDSOLocal(false);
   } else if (VI && VI.isDSOLocal(ImportIndex.withDSOLocalPropagation())) {

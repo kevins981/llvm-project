@@ -13,8 +13,9 @@
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/ModuleSlotTracker.h"
-#include "llvm/MC/MCContext.h"
 #include "llvm/MC/MCAsmInfo.h"
+#include "llvm/MC/MCContext.h"
+#include "llvm/Support/LowLevelTypeImpl.h"
 #include "llvm/Support/raw_ostream.h"
 #include "gtest/gtest.h"
 
@@ -319,7 +320,7 @@ TEST(MachineOperandTest, PrintMetadata) {
 TEST(MachineOperandTest, PrintMCSymbol) {
   MCAsmInfo MAI;
   Triple T = Triple("unknown-unknown-unknown");
-  MCContext Ctx(T, &MAI, /*MRI=*/nullptr, /*MOFI=*/nullptr, /*MSTI=*/nullptr);
+  MCContext Ctx(T, &MAI, /*MRI=*/nullptr, /*MSTI=*/nullptr);
   MCSymbol *Sym = Ctx.getOrCreateSymbol("foo");
 
   // Create a MachineOperand with a metadata and print it.

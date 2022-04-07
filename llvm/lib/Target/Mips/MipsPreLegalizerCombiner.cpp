@@ -16,6 +16,7 @@
 #include "llvm/CodeGen/GlobalISel/CombinerHelper.h"
 #include "llvm/CodeGen/GlobalISel/CombinerInfo.h"
 #include "llvm/CodeGen/GlobalISel/MIPatternMatch.h"
+#include "llvm/CodeGen/MachineFunctionPass.h"
 #include "llvm/CodeGen/TargetPassConfig.h"
 #include "llvm/InitializePasses.h"
 
@@ -42,6 +43,8 @@ bool MipsPreLegalizerCombinerInfo::combine(GISelChangeObserver &Observer,
   switch (MI.getOpcode()) {
   default:
     return false;
+  case TargetOpcode::G_MEMCPY_INLINE:
+    return Helper.tryEmitMemcpyInline(MI);
   case TargetOpcode::G_LOAD:
   case TargetOpcode::G_SEXTLOAD:
   case TargetOpcode::G_ZEXTLOAD: {

@@ -29,7 +29,7 @@
 #include "lldb/Target/Thread.h"
 #include "lldb/Utility/RegularExpression.h"
 #include "lldb/Utility/Stream.h"
-#include <ctype.h>
+#include <cctype>
 
 #include <memory>
 
@@ -54,10 +54,6 @@ void InstrumentationRuntimeUBSan::Initialize() {
 
 void InstrumentationRuntimeUBSan::Terminate() {
   PluginManager::UnregisterPlugin(CreateInstance);
-}
-
-lldb_private::ConstString InstrumentationRuntimeUBSan::GetPluginNameStatic() {
-  return ConstString("UndefinedBehaviorSanitizer");
 }
 
 lldb::InstrumentationRuntimeType InstrumentationRuntimeUBSan::GetTypeStatic() {
@@ -140,9 +136,11 @@ StructuredData::ObjectSP InstrumentationRuntimeUBSan::RetrieveReportData(
       exe_ctx, options, ub_sanitizer_retrieve_report_data_command, "",
       main_value, eval_error);
   if (result != eExpressionCompleted) {
-    target.GetDebugger().GetAsyncOutputStream()->Printf(
-        "Warning: Cannot evaluate UndefinedBehaviorSanitizer expression:\n%s\n",
-        eval_error.AsCString());
+    StreamString ss;
+    ss << "cannot evaluate UndefinedBehaviorSanitizer expression:\n";
+    ss << eval_error.AsCString();
+    Debugger::ReportWarning(ss.GetString().str(),
+                            process_sp->GetTarget().GetDebugger().GetID());
     return StructuredData::ObjectSP();
   }
 

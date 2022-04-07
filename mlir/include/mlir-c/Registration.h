@@ -20,7 +20,7 @@ extern "C" {
 // Dialect registration declarations.
 // Registration entry-points for each dialect are declared using the common
 // MLIR_DECLARE_DIALECT_REGISTRATION_CAPI macro, which takes the dialect
-// API name (i.e. "Standard", "Tensor", "Linalg") and namespace (i.e. "std",
+// API name (i.e. "Func", "Tensor", "Linalg") and namespace (i.e. "func",
 // "tensor", "linalg"). The following declarations are produced:
 //
 //   /// Gets the above hook methods in struct form for a dialect by namespace.
@@ -44,6 +44,11 @@ typedef struct MlirDialectHandle MlirDialectHandle;
 MLIR_CAPI_EXPORTED
 MlirStringRef mlirDialectHandleGetNamespace(MlirDialectHandle);
 
+/// Inserts the dialect associated with the provided dialect handle into the
+/// provided dialect registry
+MLIR_CAPI_EXPORTED void mlirDialectHandleInsertDialect(MlirDialectHandle,
+                                                       MlirDialectRegistry);
+
 /// Registers the dialect associated with the provided dialect handle.
 MLIR_CAPI_EXPORTED void mlirDialectHandleRegisterDialect(MlirDialectHandle,
                                                          MlirContext);
@@ -59,6 +64,9 @@ MLIR_CAPI_EXPORTED void mlirRegisterAllDialects(MlirContext context);
 
 /// Register all translations to LLVM IR for dialects that can support it.
 MLIR_CAPI_EXPORTED void mlirRegisterAllLLVMTranslations(MlirContext context);
+
+/// Register all compiler passes of MLIR.
+MLIR_CAPI_EXPORTED void mlirRegisterAllPasses();
 
 #ifdef __cplusplus
 }

@@ -15,17 +15,13 @@
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/iterator_range.h"
 #include "llvm/BinaryFormat/Dwarf.h"
+#include "llvm/DebugInfo/DWARF/DWARFAddressRange.h"
+#include "llvm/DebugInfo/DWARF/DWARFDataExtractor.h"
 #include "llvm/DebugInfo/DWARF/DWARFDebugInfoEntry.h"
-#include "llvm/DebugInfo/DWARF/DWARFDebugLoc.h"
-#include "llvm/DebugInfo/DWARF/DWARFDebugRangeList.h"
-#include "llvm/DebugInfo/DWARF/DWARFDebugRnglists.h"
 #include "llvm/DebugInfo/DWARF/DWARFDie.h"
-#include "llvm/DebugInfo/DWARF/DWARFFormValue.h"
-#include "llvm/DebugInfo/DWARF/DWARFRelocMap.h"
-#include "llvm/DebugInfo/DWARF/DWARFSection.h"
+#include "llvm/DebugInfo/DWARF/DWARFLocationExpression.h"
 #include "llvm/DebugInfo/DWARF/DWARFUnitIndex.h"
 #include "llvm/Support/DataExtractor.h"
-#include <algorithm>
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
@@ -40,6 +36,12 @@ class DWARFAbbreviationDeclarationSet;
 class DWARFContext;
 class DWARFDebugAbbrev;
 class DWARFUnit;
+class DWARFDebugRangeList;
+class DWARFLocationTable;
+class DWARFObject;
+class raw_ostream;
+struct DIDumpOptions;
+struct DWARFSection;
 
 /// Base class describing the header of any kind of "unit."  Some information
 /// is specific to certain unit types.  We separate this class out so we can
@@ -218,6 +220,7 @@ class DWARFUnit {
   StringRef StringSection;
   const DWARFSection &StringOffsetSection;
   const DWARFSection *AddrOffsetSection;
+  DWARFUnit *SU;
   Optional<uint64_t> AddrOffsetSectionBase;
   bool isLittleEndian;
   bool IsDWO;
@@ -301,6 +304,12 @@ public:
     return StringOffsetSection;
   }
 
+  void setSkeletonUnit(DWARFUnit *SU) { this->SU = SU; }
+  // Returns itself if not using Split DWARF, or if the unit is a skeleton unit
+  // - otherwise returns the split full unit's corresponding skeleton, if
+  // available.
+  DWARFUnit *getLinkedUnit() { return IsDWO ? SU : this; }
+
   void setAddrOffsetSection(const DWARFSection *AOS, uint64_t Base) {
     AddrOffsetSection = AOS;
     AddrOffsetSectionBase = Base;
@@ -324,7 +333,7 @@ public:
 
   Optional<object::SectionedAddress>
   getAddrOffsetSectionItem(uint32_t Index) const;
-  Optional<uint64_t> getStringOffsetSectionItem(uint32_t Index) const;
+  Expected<uint64_t> getStringOffsetSectionItem(uint32_t Index) const;
 
   DWARFDataExtractor getDebugInfoExtractor() const;
 
@@ -356,6 +365,8 @@ public:
     assert(StringOffsetsTableContribution);
     return StringOffsetsTableContribution->Base;
   }
+
+  uint64_t getAbbreviationsOffset() const { return Header.getAbbrOffset(); }
 
   const DWARFAbbreviationDeclarationSet *getAbbreviations() const;
 

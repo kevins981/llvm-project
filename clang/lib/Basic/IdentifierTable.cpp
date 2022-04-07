@@ -107,8 +107,9 @@ namespace {
     KEYCXX20      = 0x200000,
     KEYOPENCLCXX  = 0x400000,
     KEYMSCOMPAT   = 0x800000,
+    KEYSYCL       = 0x1000000,
     KEYALLCXX = KEYCXX | KEYCXX11 | KEYCXX20,
-    KEYALL = (0xffffff & ~KEYNOMS18 &
+    KEYALL = (0x1ffffff & ~KEYNOMS18 &
               ~KEYNOOPENCL) // KEYNOMS18 and KEYNOOPENCL are used to exclude.
   };
 
@@ -155,6 +156,8 @@ static KeywordStatus getKeywordStatus(const LangOptions &LangOpts,
   if (LangOpts.CPlusPlus && (Flags & KEYALLCXX)) return KS_Future;
   if (LangOpts.CPlusPlus && !LangOpts.CPlusPlus20 && (Flags & CHAR8SUPPORT))
     return KS_Future;
+  if (LangOpts.isSYCL() && (Flags & KEYSYCL))
+    return KS_Enabled;
   return KS_Disabled;
 }
 
@@ -306,6 +309,14 @@ IdentifierInfo::isReserved(const LangOptions &LangOpts) const {
   return ReservedIdentifierStatus::NotReserved;
 }
 
+StringRef IdentifierInfo::deuglifiedName() const {
+  StringRef Name = getName();
+  if (Name.size() >= 2 && Name.front() == '_' &&
+      (Name[1] == '_' || (Name[1] >= 'A' && Name[1] <= 'Z')))
+    return Name.ltrim('_');
+  return Name;
+}
+
 tok::PPKeywordKind IdentifierInfo::getPPKeywordID() const {
   // We use a perfect hash function here involving the length of the keyword,
   // the first and third character.  For preprocessor ID's there are no
@@ -341,9 +352,11 @@ tok::PPKeywordKind IdentifierInfo::getPPKeywordID() const {
   CASE( 6, 'p', 'a', pragma);
 
   CASE( 7, 'd', 'f', defined);
+  CASE( 7, 'e', 'i', elifdef);
   CASE( 7, 'i', 'c', include);
   CASE( 7, 'w', 'r', warning);
 
+  CASE( 8, 'e', 'i', elifndef);
   CASE( 8, 'u', 'a', unassert);
   CASE(12, 'i', 'c', include_next);
 

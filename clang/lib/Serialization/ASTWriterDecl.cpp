@@ -68,6 +68,7 @@ namespace clang {
     void VisitTypedefDecl(TypedefDecl *D);
     void VisitTypeAliasDecl(TypeAliasDecl *D);
     void VisitUnresolvedUsingTypenameDecl(UnresolvedUsingTypenameDecl *D);
+    void VisitUnresolvedUsingIfExistsDecl(UnresolvedUsingIfExistsDecl *D);
     void VisitTagDecl(TagDecl *D);
     void VisitEnumDecl(EnumDecl *D);
     void VisitRecordDecl(RecordDecl *D);
@@ -95,6 +96,7 @@ namespace clang {
     void VisitFieldDecl(FieldDecl *D);
     void VisitMSPropertyDecl(MSPropertyDecl *D);
     void VisitMSGuidDecl(MSGuidDecl *D);
+    void VisitUnnamedGlobalConstantDecl(UnnamedGlobalConstantDecl *D);
     void VisitTemplateParamObjectDecl(TemplateParamObjectDecl *D);
     void VisitIndirectFieldDecl(IndirectFieldDecl *D);
     void VisitVarDecl(VarDecl *D);
@@ -113,6 +115,7 @@ namespace clang {
     void VisitTemplateTemplateParmDecl(TemplateTemplateParmDecl *D);
     void VisitTypeAliasTemplateDecl(TypeAliasTemplateDecl *D);
     void VisitUsingDecl(UsingDecl *D);
+    void VisitUsingEnumDecl(UsingEnumDecl *D);
     void VisitUsingPackDecl(UsingPackDecl *D);
     void VisitUsingShadowDecl(UsingShadowDecl *D);
     void VisitConstructorUsingShadowDecl(ConstructorUsingShadowDecl *D);
@@ -960,9 +963,15 @@ void ASTDeclWriter::VisitMSGuidDecl(MSGuidDecl *D) {
   Record.push_back(Parts.Part1);
   Record.push_back(Parts.Part2);
   Record.push_back(Parts.Part3);
-  for (auto C : Parts.Part4And5)
-    Record.push_back(C);
+  Record.append(std::begin(Parts.Part4And5), std::end(Parts.Part4And5));
   Code = serialization::DECL_MS_GUID;
+}
+
+void ASTDeclWriter::VisitUnnamedGlobalConstantDecl(
+    UnnamedGlobalConstantDecl *D) {
+  VisitValueDecl(D);
+  Record.AddAPValue(D->getValue());
+  Code = serialization::DECL_UNNAMED_GLOBAL_CONSTANT;
 }
 
 void ASTDeclWriter::VisitTemplateParamObjectDecl(TemplateParamObjectDecl *D) {
@@ -1020,12 +1029,12 @@ void ASTDeclWriter::VisitVarDecl(VarDecl *D) {
     if (Writer.WritingModule &&
         !D->getDescribedVarTemplate() && !D->getMemberSpecializationInfo() &&
         !isa<VarTemplateSpecializationDecl>(D)) {
-      // When building a C++ Modules TS module interface unit, a strong
-      // definition in the module interface is provided by the compilation of
-      // that module interface unit, not by its users. (Inline variables are
-      // still emitted in module users.)
+      // When building a C++20 module interface unit or a partition unit, a
+      // strong definition in the module interface is provided by the
+      // compilation of that unit, not by its users. (Inline variables are still
+      // emitted in module users.)
       ModulesCodegen =
-          (Writer.WritingModule->Kind == Module::ModuleInterfaceUnit ||
+          (Writer.WritingModule->isInterfaceOrPartition() ||
            (D->hasAttr<DLLExportAttr>() &&
             Writer.Context->getLangOpts().BuildingPCHWithObjectFile)) &&
           Writer.Context->GetGVALinkageForVariable(D) == GVA_StrongExternal;
@@ -1277,6 +1286,16 @@ void ASTDeclWriter::VisitUsingDecl(UsingDecl *D) {
   Code = serialization::DECL_USING;
 }
 
+void ASTDeclWriter::VisitUsingEnumDecl(UsingEnumDecl *D) {
+  VisitNamedDecl(D);
+  Record.AddSourceLocation(D->getUsingLoc());
+  Record.AddSourceLocation(D->getEnumLoc());
+  Record.AddDeclRef(D->getEnumDecl());
+  Record.AddDeclRef(D->FirstUsingShadow.getPointer());
+  Record.AddDeclRef(Context.getInstantiatedFromUsingEnumDecl(D));
+  Code = serialization::DECL_USING_ENUM;
+}
+
 void ASTDeclWriter::VisitUsingPackDecl(UsingPackDecl *D) {
   Record.push_back(D->NumExpansions);
   VisitNamedDecl(D);
@@ -1331,6 +1350,12 @@ void ASTDeclWriter::VisitUnresolvedUsingTypenameDecl(
   Record.AddNestedNameSpecifierLoc(D->getQualifierLoc());
   Record.AddSourceLocation(D->getEllipsisLoc());
   Code = serialization::DECL_UNRESOLVED_USING_TYPENAME;
+}
+
+void ASTDeclWriter::VisitUnresolvedUsingIfExistsDecl(
+    UnresolvedUsingIfExistsDecl *D) {
+  VisitNamedDecl(D);
+  Code = serialization::DECL_UNRESOLVED_USING_IF_EXISTS;
 }
 
 void ASTDeclWriter::VisitCXXRecordDecl(CXXRecordDecl *D) {
@@ -2242,7 +2267,7 @@ void ASTWriter::WriteDeclAbbrevs() {
   Abv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Fixed, 1)); // Defaulted
   Abv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Fixed, 1)); // ExplicitlyDefaulted
   Abv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Fixed, 1)); // ImplicitReturnZero
-  Abv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Fixed, 1)); // Constexpr
+  Abv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Fixed, 2)); // Constexpr
   Abv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Fixed, 1)); // UsesSEHTry
   Abv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Fixed, 1)); // SkippedBody
   Abv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Fixed, 1)); // MultiVersion
@@ -2445,11 +2470,11 @@ void ASTRecordWriter::AddFunctionDefinition(const FunctionDecl *FD) {
   if (!FD->isDependentContext()) {
     Optional<GVALinkage> Linkage;
     if (Writer->WritingModule &&
-        Writer->WritingModule->Kind == Module::ModuleInterfaceUnit) {
-      // When building a C++ Modules TS module interface unit, a strong
-      // definition in the module interface is provided by the compilation of
-      // that module interface unit, not by its users. (Inline functions are
-      // still emitted in module users.)
+        Writer->WritingModule->isInterfaceOrPartition()) {
+      // When building a C++20 module interface unit or a partition unit, a
+      // strong definition in the module interface is provided by the
+      // compilation of that unit, not by its users. (Inline functions are still
+      // emitted in module users.)
       Linkage = Writer->Context->GetGVALinkageForFunction(FD);
       ModulesCodegen = *Linkage == GVA_StrongExternal;
     }

@@ -1,8 +1,16 @@
+//===--- Threading.cpp - Abstractions for multithreading ------------------===//
+//
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+//
+//===----------------------------------------------------------------------===//
+
 #include "support/Threading.h"
 #include "support/Trace.h"
 #include "llvm/ADT/ScopeExit.h"
-#include "llvm/Support/FormatVariadic.h"
 #include "llvm/Support/Threading.h"
+#include "llvm/Support/thread.h"
 #include <atomic>
 #include <thread>
 #ifdef __USE_POSIX
@@ -95,8 +103,10 @@ void AsyncTaskRunner::runAsync(const llvm::Twine &Name,
   };
 
   // Ensure our worker threads have big enough stacks to run clang.
-  llvm::llvm_execute_on_thread_async(std::move(Task),
-                                     /*clang::DesiredStackSize*/ 8 << 20);
+  llvm::thread Thread(
+      /*clang::DesiredStackSize*/ llvm::Optional<unsigned>(8 << 20),
+      std::move(Task));
+  Thread.detach();
 }
 
 Deadline timeoutSeconds(llvm::Optional<double> Seconds) {

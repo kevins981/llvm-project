@@ -14,7 +14,6 @@
 #include "llvm/CodeGen/AsmPrinter.h"
 #include "llvm/CodeGen/MachineModuleInfo.h"
 #include "llvm/CodeGen/TargetLoweringObjectFileImpl.h"
-#include "llvm/MC/MCSectionXCOFF.h"
 #include "llvm/MC/MCStreamer.h"
 #include "llvm/Target/TargetLoweringObjectFile.h"
 #include "llvm/Target/TargetMachine.h"
@@ -22,6 +21,8 @@
 namespace llvm {
 
 AIXException::AIXException(AsmPrinter *A) : DwarfCFIExceptionBase(A) {}
+
+void AIXException::markFunctionEnd() { endFragment(); }
 
 void AIXException::emitExceptionInfoTable(const MCSymbol *LSDA,
                                           const MCSymbol *PerSym) {
@@ -61,6 +62,9 @@ void AIXException::emitExceptionInfoTable(const MCSymbol *LSDA,
 }
 
 void AIXException::endFunction(const MachineFunction *MF) {
+  // There is no easy way to access register information in `AIXException`
+  // class. when ShouldEmitEHBlock is false and VRs are saved, A dumy eh info
+  // table are emitted in PPCAIXAsmPrinter::emitFunctionBodyEnd.
   if (!TargetLoweringObjectFileXCOFF::ShouldEmitEHBlock(MF))
     return;
 
@@ -69,8 +73,8 @@ void AIXException::endFunction(const MachineFunction *MF) {
   const Function &F = MF->getFunction();
   assert(F.hasPersonalityFn() &&
          "Landingpads are presented, but no personality routine is found.");
-  const GlobalValue *Per =
-      dyn_cast<GlobalValue>(F.getPersonalityFn()->stripPointerCasts());
+  const auto *Per =
+      cast<GlobalValue>(F.getPersonalityFn()->stripPointerCasts());
   const MCSymbol *PerSym = Asm->TM.getSymbol(Per);
 
   emitExceptionInfoTable(LSDALabel, PerSym);

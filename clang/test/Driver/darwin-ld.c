@@ -140,6 +140,13 @@
 // LINK_VERSION_MIN: {{ld(.exe)?"}}
 // LINK_VERSION_MIN: "-macosx_version_min" "10.7.0"
 
+// RUN: %clang -target x86_64-apple-ios13.1-macabi -fuse-ld= -mlinker-version=400 -### %t.o 2>> %t.log
+// RUN: FileCheck -check-prefix=LINK_VERSION_MIN_MACABI %s < %t.log
+// LINK_VERSION_MIN_MACABI: {{ld(.exe)?"}}
+// LINK_VERSION_MIN_MACABI: "-maccatalyst_version_min" "13.1.0"
+// LINK_VERSION_MIN_MACABI-NOT: macosx_version_min
+// LINK_VERSION_MIN_MACABI-NOT: macos_version_min
+
 // RUN: %clang -target x86_64-apple-darwin12 -### %t.o 2> %t.log
 // RUN: FileCheck -check-prefix=LINK_NO_CRT1 %s < %t.log
 // LINK_NO_CRT1-NOT: crt
@@ -229,6 +236,9 @@
 // RUN: %clang -target x86_64-apple-darwin12 -rdynamic -### %t.o \
 // RUN:   -fuse-ld= -mlinker-version=137 2> %t.log
 // RUN: FileCheck -check-prefix=LINK_EXPORT_DYNAMIC %s < %t.log
+// RUN: %clang -target x86_64-apple-darwin12 -rdynamic -### %t.o \
+// RUN:   -fuse-ld=lld -B%S/Inputs/lld -mlinker-version=100 2> %t.log
+// RUN: FileCheck -check-prefix=LINK_EXPORT_DYNAMIC %s < %t.log
 // LINK_EXPORT_DYNAMIC: {{ld(.exe)?"}}
 // LINK_EXPORT_DYNAMIC: "-export_dynamic"
 
@@ -304,20 +314,10 @@
 // LINK_VERSION_DIGITS-NOT: invalid version number in '-mlinker-version=133.3'
 // LINK_VERSION_DIGITS-NOT: invalid version number in '-mlinker-version=133.3.0'
 // LINK_VERSION_DIGITS-NOT: invalid version number in '-mlinker-version=133.3.0.1'
-// LINK_VERSION_DIGITS-NOT: invalid version number in '-mlinker-version=133.3.0.1.2'
+// LINK_VERSION_DIGITS: invalid version number in '-mlinker-version=133.3.0.1.2'
 // LINK_VERSION_DIGITS: invalid version number in '-mlinker-version=133.3.0.1.2.6'
 // LINK_VERSION_DIGITS: invalid version number in '-mlinker-version=133.3.0.1.a'
 // LINK_VERSION_DIGITS: invalid version number in '-mlinker-version=133.3.0.1a'
-
-// RUN: %clang -target x86_64-apple-ios6.0 -miphoneos-version-min=6.0 -fprofile-instr-generate -### %t.o 2> %t.log
-// RUN: FileCheck -check-prefix=LINK_PROFILE_FIRST %s < %t.log
-// RUN: %clang -target x86_64-apple-darwin12 -fprofile-instr-generate -### %t.o 2> %t.log
-// RUN: FileCheck -check-prefix=LINK_PROFILE_FIRST %s < %t.log
-// RUN: %clang -target i386-apple-darwin9 -fprofile-instr-generate -### %t.o 2> %t.log
-// RUN: FileCheck -check-prefix=LINK_PROFILE_FIRST %s < %t.log
-// RUN: %clang -target arm64-apple-ios5.0 -miphoneos-version-min=5.0 -fprofile-instr-generate -### %t.o 2> %t.log
-// RUN: FileCheck -check-prefix=LINK_PROFILE_FIRST %s < %t.log
-// LINK_PROFILE_FIRST: {{ld(.exe)?"}} "{{[^"]+}}libclang_rt.profile_{{[a-z]+}}.a"
 
 // RUN: %clang -target x86_64-apple-darwin12 -fprofile-instr-generate -### %t.o 2> %t.log
 // RUN: FileCheck -check-prefix=PROFILE_SECTALIGN %s < %t.log

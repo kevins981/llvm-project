@@ -16,6 +16,7 @@
 #include "polly/Options.h"
 #include "polly/ScopInfo.h"
 #include "polly/ScopPass.h"
+#include "polly/Support/ISLTools.h"
 #include "polly/Support/ScopLocation.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/IR/Module.h"
@@ -219,7 +220,7 @@ static bool importContext(Scop &S, const json::Object &JScop) {
                                  JScop.getString("context").getValue().str()};
 
   // Check whether the context was parsed successfully.
-  if (!NewContext) {
+  if (NewContext.is_null()) {
     errs() << "The context was not parsed successfully by ISL.\n";
     return false;
   }
@@ -230,8 +231,8 @@ static bool importContext(Scop &S, const json::Object &JScop) {
     return false;
   }
 
-  unsigned OldContextDim = OldContext.dim(isl::dim::param);
-  unsigned NewContextDim = NewContext.dim(isl::dim::param);
+  unsigned OldContextDim = unsignedFromIslSize(OldContext.dim(isl::dim::param));
+  unsigned NewContextDim = unsignedFromIslSize(NewContext.dim(isl::dim::param));
 
   // Check if the imported context has the right number of parameters.
   if (OldContextDim != NewContextDim) {
@@ -321,12 +322,12 @@ static bool importSchedule(Scop &S, const json::Object &JScop,
     return false;
   }
 
-  auto ScheduleMap = isl::union_map::empty(S.getParamSpace());
+  auto ScheduleMap = isl::union_map::empty(S.getIslCtx());
   for (ScopStmt &Stmt : S) {
     if (NewSchedule.find(&Stmt) != NewSchedule.end())
-      ScheduleMap = ScheduleMap.add_map(NewSchedule[&Stmt]);
+      ScheduleMap = ScheduleMap.unite(NewSchedule[&Stmt]);
     else
-      ScheduleMap = ScheduleMap.add_map(Stmt.getSchedule());
+      ScheduleMap = ScheduleMap.unite(Stmt.getSchedule());
   }
 
   S.setSchedule(ScheduleMap);
@@ -832,3 +833,49 @@ INITIALIZE_PASS_END(JSONImporter, "polly-import-jscop",
                     "Polly - Import Scops from JSON"
                     " (Reads a .jscop file for each Scop)",
                     false, false)
+
+//===----------------------------------------------------------------------===//
+
+namespace {
+/// Print result from JSONImporter.
+class JSONImporterPrinterLegacyPass : public ScopPass {
+public:
+  static char ID;
+
+  JSONImporterPrinterLegacyPass() : JSONImporterPrinterLegacyPass(outs()){};
+  explicit JSONImporterPrinterLegacyPass(llvm::raw_ostream &OS)
+      : ScopPass(ID), OS(OS) {}
+
+  bool runOnScop(Scop &S) override {
+    JSONImporter &P = getAnalysis<JSONImporter>();
+
+    OS << "Printing analysis '" << P.getPassName() << "' for region: '"
+       << S.getRegion().getNameStr() << "' in function '"
+       << S.getFunction().getName() << "':\n";
+    P.printScop(OS, S);
+
+    return false;
+  }
+
+  void getAnalysisUsage(AnalysisUsage &AU) const override {
+    ScopPass::getAnalysisUsage(AU);
+    AU.addRequired<JSONImporter>();
+    AU.setPreservesAll();
+  }
+
+private:
+  llvm::raw_ostream &OS;
+};
+
+char JSONImporterPrinterLegacyPass::ID = 0;
+} // namespace
+
+Pass *polly::createJSONImporterPrinterLegacyPass(llvm::raw_ostream &OS) {
+  return new JSONImporterPrinterLegacyPass(OS);
+}
+
+INITIALIZE_PASS_BEGIN(JSONImporterPrinterLegacyPass, "polly-print-import-jscop",
+                      "Polly - Print Scop import result", false, false)
+INITIALIZE_PASS_DEPENDENCY(JSONImporter)
+INITIALIZE_PASS_END(JSONImporterPrinterLegacyPass, "polly-print-import-jscop",
+                    "Polly - Print Scop import result", false, false)

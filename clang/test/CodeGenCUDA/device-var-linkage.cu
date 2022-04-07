@@ -1,13 +1,13 @@
-// RUN: %clang_cc1 -triple nvptx -fcuda-is-device \
+// RUN: %clang_cc1 -no-opaque-pointers -triple nvptx -fcuda-is-device \
 // RUN:   -emit-llvm -o - -x hip %s \
 // RUN:   | FileCheck -check-prefixes=DEV,NORDC %s
-// RUN: %clang_cc1 -triple nvptx -fcuda-is-device \
+// RUN: %clang_cc1 -no-opaque-pointers -triple nvptx -fcuda-is-device \
 // RUN:   -fgpu-rdc -cuid=abc -emit-llvm -o - -x hip %s \
 // RUN:   | FileCheck -check-prefixes=DEV,RDC %s
-// RUN: %clang_cc1 -triple nvptx \
+// RUN: %clang_cc1 -no-opaque-pointers -triple nvptx \
 // RUN:   -emit-llvm -o - -x hip %s \
 // RUN:   | FileCheck -check-prefixes=HOST,NORDC-H %s
-// RUN: %clang_cc1 -triple nvptx \
+// RUN: %clang_cc1 -no-opaque-pointers -triple nvptx \
 // RUN:   -fgpu-rdc -cuid=abc -emit-llvm -o - -x hip %s \
 // RUN:   | FileCheck -check-prefixes=HOST,RDC-H %s
 
@@ -37,15 +37,15 @@ extern __constant__ int ev2;
 extern __managed__ int ev3;
 
 // NORDC-DAG: @_ZL3sv1 = addrspace(1) externally_initialized global i32 0
-// RDC-DAG: @_ZL3sv1.static.[[HASH:.*]] = addrspace(1) externally_initialized global i32 0
+// RDC-DAG: @_ZL3sv1__static__[[HASH:.*]] = addrspace(1) externally_initialized global i32 0
 // HOST-DAG: @_ZL3sv1 = internal global i32 undef
 static __device__ int sv1;
 // NORDC-DAG: @_ZL3sv2 = addrspace(4) externally_initialized global i32 0
-// RDC-DAG: @_ZL3sv2.static.[[HASH]] = addrspace(4) externally_initialized global i32 0
+// RDC-DAG: @_ZL3sv2__static__[[HASH]] = addrspace(4) externally_initialized global i32 0
 // HOST-DAG: @_ZL3sv2 = internal global i32 undef
 static __constant__ int sv2;
 // NORDC-DAG: @_ZL3sv3 = addrspace(1) externally_initialized global i32 addrspace(1)* null
-// RDC-DAG: @_ZL3sv3.static.[[HASH]] = addrspace(1) externally_initialized global i32 addrspace(1)* null
+// RDC-DAG: @_ZL3sv3__static__[[HASH]] = addrspace(1) externally_initialized global i32 addrspace(1)* null
 // HOST-DAG: @_ZL3sv3 = internal externally_initialized global i32* null
 static __managed__ int sv3;
 

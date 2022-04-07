@@ -15,8 +15,10 @@
 
 #include "AArch64MachineFunctionInfo.h"
 #include "AArch64InstrInfo.h"
-#include <llvm/IR/Metadata.h>
-#include <llvm/IR/Module.h>
+#include "llvm/MC/MCAsmInfo.h"
+#include "llvm/IR/Constants.h"
+#include "llvm/IR/Metadata.h"
+#include "llvm/IR/Module.h"
 
 using namespace llvm;
 
@@ -73,8 +75,8 @@ static bool ShouldSignWithBKey(const Function &F) {
 
   const StringRef Key =
       F.getFnAttribute("sign-return-address-key").getValueAsString();
-  assert(Key.equals_lower("a_key") || Key.equals_lower("b_key"));
-  return Key.equals_lower("b_key");
+  assert(Key.equals_insensitive("a_key") || Key.equals_insensitive("b_key"));
+  return Key.equals_insensitive("b_key");
 }
 
 AArch64FunctionInfo::AArch64FunctionInfo(MachineFunction &MF) : MF(MF) {
@@ -94,9 +96,11 @@ AArch64FunctionInfo::AArch64FunctionInfo(MachineFunction &MF) : MF(MF) {
     return;
   }
 
-  const StringRef BTIEnable = F.getFnAttribute("branch-target-enforcement").getValueAsString();
-  assert(BTIEnable.equals_lower("true") || BTIEnable.equals_lower("false"));
-  BranchTargetEnforcement = BTIEnable.equals_lower("true");
+  const StringRef BTIEnable =
+      F.getFnAttribute("branch-target-enforcement").getValueAsString();
+  assert(BTIEnable.equals_insensitive("true") ||
+         BTIEnable.equals_insensitive("false"));
+  BranchTargetEnforcement = BTIEnable.equals_insensitive("true");
 }
 
 bool AArch64FunctionInfo::shouldSignReturnAddress(bool SpillsLR) const {
@@ -111,4 +115,20 @@ bool AArch64FunctionInfo::shouldSignReturnAddress() const {
   return shouldSignReturnAddress(llvm::any_of(
       MF.getFrameInfo().getCalleeSavedInfo(),
       [](const auto &Info) { return Info.getReg() == AArch64::LR; }));
+}
+
+bool AArch64FunctionInfo::needsDwarfUnwindInfo() const {
+  if (!NeedsDwarfUnwindInfo.hasValue())
+    NeedsDwarfUnwindInfo = MF.needsFrameMoves() &&
+                           !MF.getTarget().getMCAsmInfo()->usesWindowsCFI();
+
+  return NeedsDwarfUnwindInfo.getValue();
+}
+
+bool AArch64FunctionInfo::needsAsyncDwarfUnwindInfo() const {
+  if (!NeedsDwarfAsyncUnwindInfo.hasValue())
+    NeedsDwarfAsyncUnwindInfo =
+        needsDwarfUnwindInfo() &&
+        MF.getFunction().getUWTableKind() == UWTableKind::Async;
+  return NeedsDwarfAsyncUnwindInfo.getValue();
 }

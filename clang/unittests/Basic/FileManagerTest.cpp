@@ -12,6 +12,7 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/VirtualFileSystem.h"
+#include "llvm/Testing/Support/Error.h"
 #include "gtest/gtest.h"
 
 using namespace llvm;
@@ -30,18 +31,18 @@ private:
 
   void InjectFileOrDirectory(const char *Path, ino_t INode, bool IsFile,
                              const char *StatPath) {
-#ifndef _WIN32
     SmallString<128> NormalizedPath(Path);
-    llvm::sys::path::native(NormalizedPath);
-    Path = NormalizedPath.c_str();
-
     SmallString<128> NormalizedStatPath;
-    if (StatPath) {
-      NormalizedStatPath = StatPath;
-      llvm::sys::path::native(NormalizedStatPath);
-      StatPath = NormalizedStatPath.c_str();
+    if (is_style_posix(llvm::sys::path::Style::native)) {
+      llvm::sys::path::native(NormalizedPath);
+      Path = NormalizedPath.c_str();
+
+      if (StatPath) {
+        NormalizedStatPath = StatPath;
+        llvm::sys::path::native(NormalizedStatPath);
+        StatPath = NormalizedStatPath.c_str();
+      }
     }
-#endif
 
     if (!StatPath)
       StatPath = Path;
@@ -73,11 +74,11 @@ public:
                           bool isFile,
                           std::unique_ptr<llvm::vfs::File> *F,
                           llvm::vfs::FileSystem &FS) override {
-#ifndef _WIN32
     SmallString<128> NormalizedPath(Path);
-    llvm::sys::path::native(NormalizedPath);
-    Path = NormalizedPath.c_str();
-#endif
+    if (is_style_posix(llvm::sys::path::Style::native)) {
+      llvm::sys::path::native(NormalizedPath);
+      Path = NormalizedPath.c_str();
+    }
 
     if (StatCalls.count(Path) != 0) {
       Status = StatCalls[Path];
@@ -164,7 +165,6 @@ TEST_F(FileManagerTest, getFileReturnsValidFileEntryForExistingRealFile) {
 
   auto file = manager.getFile("/tmp/test");
   ASSERT_TRUE(file);
-  ASSERT_TRUE((*file)->isValid());
   EXPECT_EQ("/tmp/test", (*file)->getName());
 
   const DirectoryEntry *dir = (*file)->getDir();
@@ -189,7 +189,6 @@ TEST_F(FileManagerTest, getFileReturnsValidFileEntryForExistingVirtualFile) {
   manager.getVirtualFile("virtual/dir/bar.h", 100, 0);
   auto file = manager.getFile("virtual/dir/bar.h");
   ASSERT_TRUE(file);
-  ASSERT_TRUE((*file)->isValid());
   EXPECT_EQ("virtual/dir/bar.h", (*file)->getName());
 
   const DirectoryEntry *dir = (*file)->getDir();
@@ -211,9 +210,7 @@ TEST_F(FileManagerTest, getFileReturnsDifferentFileEntriesForDifferentFiles) {
   auto fileFoo = manager.getFile("foo.cpp");
   auto fileBar = manager.getFile("bar.cpp");
   ASSERT_TRUE(fileFoo);
-  ASSERT_TRUE((*fileFoo)->isValid());
   ASSERT_TRUE(fileBar);
-  ASSERT_TRUE((*fileBar)->isValid());
   EXPECT_NE(*fileFoo, *fileBar);
 }
 
@@ -276,9 +273,9 @@ TEST_F(FileManagerTest, getFileReturnsSameFileEntryForAliasedRealFiles) {
 
 TEST_F(FileManagerTest, getFileRefReturnsCorrectNameForDifferentStatPath) {
   // Inject files with the same inode, but where some files have a stat that
-  // gives a different name. This is adding coverage for weird stat behaviour
-  // triggered by the RedirectingFileSystem that FileManager::getFileRef has
-  // special logic for.
+  // gives a different name. This is adding coverage for stat behaviour
+  // triggered by the RedirectingFileSystem for 'use-external-name' that
+  // FileManager::getFileRef has special logic for.
   auto StatCache = std::make_unique<FakeStatCache>();
   StatCache->InjectDirectory("dir", 40);
   StatCache->InjectFile("dir/f1.cpp", 41);
@@ -339,9 +336,6 @@ TEST_F(FileManagerTest, getFileReturnsSameFileEntryForAliasedVirtualFiles) {
   statCache->InjectFile("abc/foo.cpp", 42);
   statCache->InjectFile("abc/bar.cpp", 42);
   manager.setStatCache(std::move(statCache));
-
-  ASSERT_TRUE(manager.getVirtualFile("abc/foo.cpp", 100, 0)->isValid());
-  ASSERT_TRUE(manager.getVirtualFile("abc/bar.cpp", 200, 0)->isValid());
 
   auto f1 = manager.getFile("abc/foo.cpp");
   auto f2 = manager.getFile("abc/bar.cpp");
@@ -417,14 +411,12 @@ TEST_F(FileManagerTest, getVirtualFileWithDifferentName) {
   // Inject the virtual file:
   const FileEntry *file1 = manager.getVirtualFile("c:\\tmp\\test", 123, 1);
   ASSERT_TRUE(file1 != nullptr);
-  ASSERT_TRUE(file1->isValid());
   EXPECT_EQ(43U, file1->getUniqueID().getFile());
   EXPECT_EQ(123, file1->getSize());
 
   // Lookup the virtual file with a different name:
   auto file2 = manager.getFile("c:/tmp/test", 100, 1);
   ASSERT_TRUE(file2);
-  ASSERT_TRUE((*file2)->isValid());
   // Check that it's the same UFE:
   EXPECT_EQ(file1, *file2);
   EXPECT_EQ(43U, (*file2)->getUniqueID().getFile());
@@ -435,13 +427,16 @@ TEST_F(FileManagerTest, getVirtualFileWithDifferentName) {
 
 #endif  // !_WIN32
 
+static StringRef getSystemRoot() {
+  return is_style_windows(llvm::sys::path::Style::native) ? "C:/" : "/";
+}
+
 TEST_F(FileManagerTest, makeAbsoluteUsesVFS) {
-  SmallString<64> CustomWorkingDir;
-#ifdef _WIN32
-  CustomWorkingDir = "C:";
-#else
-  CustomWorkingDir = "/";
-#endif
+  // FIXME: Should this be using a root path / call getSystemRoot()? For now,
+  // avoiding that and leaving the test as-is.
+  SmallString<64> CustomWorkingDir =
+      is_style_windows(llvm::sys::path::Style::native) ? StringRef("C:")
+                                                       : StringRef("/");
   llvm::sys::path::append(CustomWorkingDir, "some", "weird", "path");
 
   auto FS = IntrusiveRefCntPtr<llvm::vfs::InMemoryFileSystem>(
@@ -463,12 +458,7 @@ TEST_F(FileManagerTest, makeAbsoluteUsesVFS) {
 
 // getVirtualFile should always fill the real path.
 TEST_F(FileManagerTest, getVirtualFileFillsRealPathName) {
-  SmallString<64> CustomWorkingDir;
-#ifdef _WIN32
-  CustomWorkingDir = "C:/";
-#else
-  CustomWorkingDir = "/";
-#endif
+  SmallString<64> CustomWorkingDir = getSystemRoot();
 
   auto FS = IntrusiveRefCntPtr<llvm::vfs::InMemoryFileSystem>(
       new llvm::vfs::InMemoryFileSystem);
@@ -488,7 +478,6 @@ TEST_F(FileManagerTest, getVirtualFileFillsRealPathName) {
   // Check for real path.
   const FileEntry *file = Manager.getVirtualFile("/tmp/test", 123, 1);
   ASSERT_TRUE(file != nullptr);
-  ASSERT_TRUE(file->isValid());
   SmallString<64> ExpectedResult = CustomWorkingDir;
 
   llvm::sys::path::append(ExpectedResult, "tmp", "test");
@@ -496,12 +485,7 @@ TEST_F(FileManagerTest, getVirtualFileFillsRealPathName) {
 }
 
 TEST_F(FileManagerTest, getFileDontOpenRealPath) {
-  SmallString<64> CustomWorkingDir;
-#ifdef _WIN32
-  CustomWorkingDir = "C:/";
-#else
-  CustomWorkingDir = "/";
-#endif
+  SmallString<64> CustomWorkingDir = getSystemRoot();
 
   auto FS = IntrusiveRefCntPtr<llvm::vfs::InMemoryFileSystem>(
       new llvm::vfs::InMemoryFileSystem);
@@ -521,7 +505,6 @@ TEST_F(FileManagerTest, getFileDontOpenRealPath) {
   // Check for real path.
   auto file = Manager.getFile("/tmp/test", /*OpenFile=*/false);
   ASSERT_TRUE(file);
-  ASSERT_TRUE((*file)->isValid());
   SmallString<64> ExpectedResult = CustomWorkingDir;
 
   llvm::sys::path::append(ExpectedResult, "tmp", "test");
@@ -554,14 +537,14 @@ TEST_F(FileManagerTest, getBypassFile) {
   const FileEntry *File = Manager.getVirtualFile("/tmp/test", /*Size=*/10, 0);
   ASSERT_TRUE(File);
   const FileEntry &FE = *File;
-  EXPECT_TRUE(FE.isValid());
   EXPECT_EQ(FE.getSize(), 10);
 
   // Calling a second time should not affect the UID or size.
   unsigned VirtualUID = FE.getUID();
-  EXPECT_EQ(
-      &FE,
-      &expectedToOptional(Manager.getFileRef("/tmp/test"))->getFileEntry());
+  llvm::Optional<FileEntryRef> SearchRef;
+  ASSERT_THAT_ERROR(Manager.getFileRef("/tmp/test").moveInto(SearchRef),
+                    Succeeded());
+  EXPECT_EQ(&FE, &SearchRef->getFileEntry());
   EXPECT_EQ(FE.getUID(), VirtualUID);
   EXPECT_EQ(FE.getSize(), 10);
 
@@ -569,7 +552,6 @@ TEST_F(FileManagerTest, getBypassFile) {
   llvm::Optional<FileEntryRef> BypassRef =
       Manager.getBypassFile(File->getLastRef());
   ASSERT_TRUE(BypassRef);
-  EXPECT_TRUE(BypassRef->isValid());
   EXPECT_EQ("/tmp/test", BypassRef->getName());
 
   // Check that it's different in the right ways.
@@ -578,9 +560,9 @@ TEST_F(FileManagerTest, getBypassFile) {
   EXPECT_NE(BypassRef->getSize(), FE.getSize());
 
   // The virtual file should still be returned when searching.
-  EXPECT_EQ(
-      &FE,
-      &expectedToOptional(Manager.getFileRef("/tmp/test"))->getFileEntry());
+  ASSERT_THAT_ERROR(Manager.getFileRef("/tmp/test").moveInto(SearchRef),
+                    Succeeded());
+  EXPECT_EQ(&FE, &SearchRef->getFileEntry());
 }
 
 } // anonymous namespace

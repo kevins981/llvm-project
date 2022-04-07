@@ -51,24 +51,42 @@ func @exp(%arg0 : i32) -> () {
 // -----
 
 //===----------------------------------------------------------------------===//
-// spv.GLSL.FMax
+// spv.GLSL.{F|S|U}{Max|Min}
 //===----------------------------------------------------------------------===//
 
-func @fmax(%arg0 : f32, %arg1 : f32) -> () {
+func @fmaxmin(%arg0 : f32, %arg1 : f32) {
   // CHECK: spv.GLSL.FMax {{%.*}}, {{%.*}} : f32
-  %2 = spv.GLSL.FMax %arg0, %arg1 : f32
+  %1 = spv.GLSL.FMax %arg0, %arg1 : f32
+  // CHECK: spv.GLSL.FMin {{%.*}}, {{%.*}} : f32
+  %2 = spv.GLSL.FMin %arg0, %arg1 : f32
   return
 }
 
-func @fmaxvec(%arg0 : vector<3xf16>, %arg1 : vector<3xf16>) -> () {
+func @fmaxminvec(%arg0 : vector<3xf16>, %arg1 : vector<3xf16>) {
   // CHECK: spv.GLSL.FMax {{%.*}}, {{%.*}} : vector<3xf16>
-  %2 = spv.GLSL.FMax %arg0, %arg1 : vector<3xf16>
+  %1 = spv.GLSL.FMax %arg0, %arg1 : vector<3xf16>
+  // CHECK: spv.GLSL.FMin {{%.*}}, {{%.*}} : vector<3xf16>
+  %2 = spv.GLSL.FMin %arg0, %arg1 : vector<3xf16>
   return
 }
 
-func @fmaxf64(%arg0 : f64, %arg1 : f64) -> () {
+func @fmaxminf64(%arg0 : f64, %arg1 : f64) {
   // CHECK: spv.GLSL.FMax {{%.*}}, {{%.*}} : f64
-  %2 = spv.GLSL.FMax %arg0, %arg1 : f64
+  %1 = spv.GLSL.FMax %arg0, %arg1 : f64
+  // CHECK: spv.GLSL.FMin {{%.*}}, {{%.*}} : f64
+  %2 = spv.GLSL.FMin %arg0, %arg1 : f64
+  return
+}
+
+func @iminmax(%arg0: i32, %arg1: i32) {
+  // CHECK: spv.GLSL.SMax {{%.*}}, {{%.*}} : i32
+  %1 = spv.GLSL.SMax %arg0, %arg1 : i32
+  // CHECK: spv.GLSL.UMax {{%.*}}, {{%.*}} : i32
+  %2 = spv.GLSL.UMax %arg0, %arg1 : i32
+  // CHECK: spv.GLSL.SMin {{%.*}}, {{%.*}} : i32
+  %3 = spv.GLSL.SMin %arg0, %arg1 : i32
+  // CHECK: spv.GLSL.UMin {{%.*}}, {{%.*}} : i32
+  %4 = spv.GLSL.UMin %arg0, %arg1 : i32
   return
 }
 
@@ -296,7 +314,7 @@ func @fclamp(%arg0 : vector<3xf32>, %min : vector<3xf32>, %max : vector<3xf32>) 
 // spv.GLSL.UClamp
 //===----------------------------------------------------------------------===//
 
-func @fclamp(%arg0 : ui32, %min : ui32, %max : ui32) -> () {
+func @uclamp(%arg0 : ui32, %min : ui32, %max : ui32) -> () {
   // CHECK: spv.GLSL.UClamp {{%[^,]*}}, {{%[^,]*}}, {{%[^,]*}} : ui32
   %2 = spv.GLSL.UClamp %arg0, %min, %max : ui32
   return
@@ -304,7 +322,7 @@ func @fclamp(%arg0 : ui32, %min : ui32, %max : ui32) -> () {
 
 // -----
 
-func @fclamp(%arg0 : vector<4xi32>, %min : vector<4xi32>, %max : vector<4xi32>) -> () {
+func @uclamp(%arg0 : vector<4xi32>, %min : vector<4xi32>, %max : vector<4xi32>) -> () {
   // CHECK: spv.GLSL.UClamp {{%[^,]*}}, {{%[^,]*}}, {{%[^,]*}} : vector<4xi32>
   %2 = spv.GLSL.UClamp %arg0, %min, %max : vector<4xi32>
   return
@@ -312,8 +330,8 @@ func @fclamp(%arg0 : vector<4xi32>, %min : vector<4xi32>, %max : vector<4xi32>) 
 
 // -----
 
-func @fclamp(%arg0 : si32, %min : si32, %max : si32) -> () {
-  // expected-error @+1 {{must be 8/16/32/64-bit signless/unsigned integer or vector}}
+func @uclamp(%arg0 : si32, %min : si32, %max : si32) -> () {
+  // CHECK: spv.GLSL.UClamp
   %2 = spv.GLSL.UClamp %arg0, %min, %max : si32
   return
 }
@@ -324,7 +342,7 @@ func @fclamp(%arg0 : si32, %min : si32, %max : si32) -> () {
 // spv.GLSL.SClamp
 //===----------------------------------------------------------------------===//
 
-func @fclamp(%arg0 : si32, %min : si32, %max : si32) -> () {
+func @sclamp(%arg0 : si32, %min : si32, %max : si32) -> () {
   // CHECK: spv.GLSL.SClamp {{%[^,]*}}, {{%[^,]*}}, {{%[^,]*}} : si32
   %2 = spv.GLSL.SClamp %arg0, %min, %max : si32
   return
@@ -332,7 +350,7 @@ func @fclamp(%arg0 : si32, %min : si32, %max : si32) -> () {
 
 // -----
 
-func @fclamp(%arg0 : vector<4xsi32>, %min : vector<4xsi32>, %max : vector<4xsi32>) -> () {
+func @sclamp(%arg0 : vector<4xsi32>, %min : vector<4xsi32>, %max : vector<4xsi32>) -> () {
   // CHECK: spv.GLSL.SClamp {{%[^,]*}}, {{%[^,]*}}, {{%[^,]*}} : vector<4xsi32>
   %2 = spv.GLSL.SClamp %arg0, %min, %max : vector<4xsi32>
   return
@@ -340,8 +358,8 @@ func @fclamp(%arg0 : vector<4xsi32>, %min : vector<4xsi32>, %max : vector<4xsi32
 
 // -----
 
-func @fclamp(%arg0 : i32, %min : i32, %max : i32) -> () {
-  // expected-error @+1 {{must be 8/16/32/64-bit signed integer or vector}}
+func @sclamp(%arg0 : i32, %min : i32, %max : i32) -> () {
+  // CHECK: spv.GLSL.SClamp
   %2 = spv.GLSL.SClamp %arg0, %min, %max : i32
   return
 }
@@ -463,3 +481,23 @@ func @ldexp_wrong_type_vec_2(%arg0 : vector<3xf32>, %arg1 : vector<2xi32>) -> ()
   %0 = spv.GLSL.Ldexp %arg0 : vector<3xf32>, %arg1 : vector<2xi32> -> vector<3xf32>
   return
 }
+
+// -----
+
+//===----------------------------------------------------------------------===//
+// spv.GLSL.FMix
+//===----------------------------------------------------------------------===//
+
+func @fmix(%arg0 : f32, %arg1 : f32, %arg2 : f32) -> () {
+  // CHECK: {{%.*}} = spv.GLSL.FMix {{%.*}} : f32, {{%.*}} : f32, {{%.*}} : f32 -> f32
+  %0 = spv.GLSL.FMix %arg0 : f32, %arg1 : f32, %arg2 : f32 -> f32
+  return
+}
+
+// -----
+func @fmix_vector(%arg0 : vector<3xf32>, %arg1 : vector<3xf32>, %arg2 : vector<3xf32>) -> () {
+  // CHECK: {{%.*}} = spv.GLSL.FMix {{%.*}} : vector<3xf32>, {{%.*}} : vector<3xf32>, {{%.*}} : vector<3xf32> -> vector<3xf32>
+  %0 = spv.GLSL.FMix %arg0 : vector<3xf32>, %arg1 : vector<3xf32>, %arg2 : vector<3xf32> -> vector<3xf32>
+  return
+}
+
