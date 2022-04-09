@@ -4,18 +4,31 @@
 using namespace llvm;
 
 namespace {
-  // Hello - The first implementation, without getAnalysisUsage.
-  struct MPI_overlap : public FunctionPass { // this is the pass itself
-    // subclass of FunctionPass, which works on a function at a time
-    static char ID; // Pass identification, replacement for typeid
-    MPI_overlap() : FunctionPass(ID) {} // constructor
+    // Hello - The first implementation, without getAnalysisUsage.
+    struct MPI_overlap : public FunctionPass { // this is the pass itself
+        // subclass of FunctionPass, which works on a function at a time
+        static char ID; // Pass identification, replacement for typeid
+        MPI_overlap() : FunctionPass(ID) {} // constructor
 
-    bool runOnFunction(Function &F) override { // override virtual method of runOnFunction in FunctionPass
-      errs() << "MPI overlap: ";
-      errs().write_escaped(F.getName()) << '\n';
-      return false;
-    }
-  };
+        bool runOnFunction(Function &Func) override { 
+            //llvm::errs() << "Function : " << F.getName() << "\n";
+            //for(llvm::BasicBlock& b : F) {
+            //    for (llvm::BasicBlock::iterator DI = b.begin(); DI != b.end(); ) {
+            //        llvm::Instruction *I = &*DI++;
+            //        llvm::errs() << "Instruction : " << *I << "\n";
+            //    }
+            //}
+            errs() << "Function : " << Func.getName() << "\n";
+            for (auto &BB : Func) {
+                //errs() << "     Basic block : " << BB << "\n";
+                for (BasicBlock::iterator i = BB.begin(), e = BB.end(); i != e; ++i) {
+                    Instruction* ii = &*i;
+                    errs() << "         Instruction : " << *ii << "\n";
+                }
+            }
+            return false;
+        }
+    };
 }
 
 char MPI_overlap::ID = 0;
