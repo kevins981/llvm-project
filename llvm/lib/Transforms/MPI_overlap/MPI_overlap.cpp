@@ -13,6 +13,7 @@ namespace {
         MPI_overlap() : FunctionPass(ID) {} // constructor
 
         bool runOnFunction(Function &Func) override { 
+            bool modified = false;
             errs() << "Function : " << Func.getName() << "\n";
             for (auto &BB : Func) {
                 //errs() << "     Basic block : " << BB << "\n";
@@ -23,17 +24,21 @@ namespace {
                         StringRef call_func_name = callinst->getCalledFunction()->getName();
                         if (call_func_name == "MPI_Wait") {
                             errs() << "Found MPI wait call: " << *ii << "\n";
+                            Instruction* HoistPoint = BB.getTerminator();
+                            ii->moveBefore(HoistPoint);
+                            modified = true;
                         }
-                        else if (call_func_name == "MPI_Isend") {
-                            errs() << "Found MPI send call: " << *ii << "\n";
-                        }
-                        else if (call_func_name == "MPI_Irecv") {
-                            errs() << "Found MPI recv call: " << *ii << "\n";
-                        }
+
+                        //else if (call_func_name == "MPI_Isend") {
+                        //    errs() << "Found MPI send call: " << *ii << "\n";
+                        //}
+                        //else if (call_func_name == "MPI_Irecv") {
+                        //    errs() << "Found MPI recv call: " << *ii << "\n";
+                        //}
                     }
                 }
             }
-            return false;
+            return modified;
         }
     };
 }
