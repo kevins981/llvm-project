@@ -59,7 +59,7 @@ namespace {
                 Value *buf_arg = send_recv_instr->getArgOperand(0);
                 BitCastInst *bitcast_instr = dyn_cast<BitCastInst>(buf_arg);
                 buf_arg = bitcast_instr->getOperand(0); // this should be the name of the buffer
-                errs() << " the buffer name is (number): " << buf_arg->getName()  << "\n";
+                errs() << "[DEBUG] The MPI send buffer name is (number): " << buf_arg->getName()  << "\n";
                 mpi_buf_name = buf_arg->getName();
             }
             else if (call_func_name == "MPI_Irecv") {
@@ -67,11 +67,11 @@ namespace {
                 // record the fact that we have see a MPI_IRecv call
                 send_recv_instr = dyn_cast<CallInst>(ii);
                 // the first argument of Irecv, the buffer to write to
-                //Value *buf_arg = send_recv_instr->getArgOperand(0);
-                //BitCastInst *bitcast_instr = dyn_cast<BitCastInst>(buf_arg);
-                //buf_arg = bitcast_instr->getOperand(0); // this should be the name of the buffer
-                //errs() << " the recv buffer name is (number): " << buf_arg->getName()  << "\n";
-                //mpi_buf_name = buf_arg->getName();
+                Value *buf_arg = send_recv_instr->getArgOperand(0);
+                BitCastInst *bitcast_instr = dyn_cast<BitCastInst>(buf_arg);
+                buf_arg = bitcast_instr->getOperand(0); // this should be the name of the buffer
+                errs() << "[DEBUG] The MPI recv buffer name is (number): " << buf_arg->getName()  << "\n";
+                mpi_buf_name = buf_arg->getName();
             }
           }
         }
@@ -113,14 +113,14 @@ static bool iterateThruLaterInstr(Function::iterator bb,
     }
   }
   // move on to instructions in the following basic blocks
-  for (Function::iterator hoist_b = std::next(bb, 1), hoist_be = Func.end(); hoist_b != hoist_be; ++hoist_b) {
-    BasicBlock *hoist_BB = &(*hoist_b);
-    for (BasicBlock::iterator hoist_i = hoist_BB->begin(), hoist_e = hoist_BB->end(); hoist_i != hoist_e;) {
-      Instruction *Inst = &(*hoist_i); // convert iterator to pointer
-      hoist_i++; 
-      ableToMoveIntoComm(Inst, send_recv_instr, mpi_buf_name);
-    }
-  }
+  //for (Function::iterator hoist_b = std::next(bb, 1), hoist_be = Func.end(); hoist_b != hoist_be; ++hoist_b) {
+  //  BasicBlock *hoist_BB = &(*hoist_b);
+  //  for (BasicBlock::iterator hoist_i = hoist_BB->begin(), hoist_e = hoist_BB->end(); hoist_i != hoist_e;) {
+  //    Instruction *Inst = &(*hoist_i); // convert iterator to pointer
+  //    hoist_i++; 
+  //    ableToMoveIntoComm(Inst, send_recv_instr, mpi_buf_name);
+  //  }
+  //}
   return modified;
 }
 // mpi_buf_name: the buffer name used in previous MPI_Isend/Irecv call. 
@@ -144,8 +144,37 @@ static bool ableToMoveIntoComm(Instruction *instrToMove,
         }
       }
     }
+    // if the instruction is not store, assume it does not write to the MPI buffer
     return true;
   }
+  if (mpi_call_name == "MPI_Irecv") {
+    // The criteria for hoisting code into MPI_Irecv region is more strict than Isend. 
+    // Any instructions that read or write the MPI buffer CANNOT be hoisted into the MPI region.
+    unsigned num_operands = instrToMove->getNumOperands();
+    unsigned cur_operand = 0;
+    while (cur_operand < num_operands) {
+      Value *arr_arg = instrToMove->getOperand(cur_operand);
+      if (arr_arg->getName() == mpi_buf_name) {
+          // if argument is directly referencing the MPI buffer
+          errs() << "[DEBUG] Found instruction operand directly referencing MPI buffer (cannot hoist): " << arr_arg->getName()  << "\n";
+          return false;
+      }
+      GetElementPtrInst *gep_instr = nullptr;
+      if (gep_instr = dyn_cast<GetElementPtrInst>(arr_arg)) {
+        arr_arg = gep_instr->getOperand(0); // get the first argument of gep instr
+        if (arr_arg->getName() == mpi_buf_name) {
+          errs() << "[DEBUG] Found instruction operand referencing MPI buffer through a GEP instruction (cannot hoist): " << arr_arg->getName()  << "\n";
+          return false;
+        }
+      }
+      cur_operand++;
+    }
+    // if instruction does not use the MPI buffer in its operands, assume it is safe
+    // to hoist this instruction into the MPI region.
+    return true;
+  }
+  
+  errs() << "[ERROR] Unknown MPI function call name." << "\n";
   return false;
 }
 
