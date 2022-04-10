@@ -9,6 +9,12 @@ static bool ableToMoveIntoComm(BasicBlock::iterator instrToMove,
                                CallInst *send_recv_instr,
                                StringRef mpi_buf_name);
 
+static void iterateThruLaterInstr(Function::iterator bb, 
+                                  BasicBlock::iterator i, 
+                                  Function &Func,
+                                  CallInst *send_recv_instr,
+                                  StringRef mpi_buf_name);
+
 namespace {
   // Hello - The first implementation, without getAnalysisUsage.
   struct MPI_overlap : public FunctionPass { // this is the pass itself
@@ -38,31 +44,8 @@ namespace {
                 return false;
               }
               errs() << "!!!Found MPI wait call: " << *ii << "\n";
-              //Instruction* HoistPoint = BB.getTerminator();
-              //ii->moveBefore(HoistPoint);
-              //modified = true;
-
-              // go through instructions in the current basic block
-              //errs() << "~~~~instructions in the current bb \n";
-  	          for (BasicBlock::iterator hoist_i = std::next(i, 1), hoist_e = bb->end(); hoist_i != hoist_e; ++hoist_i) {
-                //if (isa<BranchInst>(hoist_i) || isa<CallInst>(hoist_i) ) {
-                //}
-                errs() << "     instr after MPI Wait: " << *hoist_i << "\n";
-                if (ableToMoveIntoComm(hoist_i, send_recv_instr, mpi_buf_name)) {
-                    errs() << " !!! we can move this instr inside MPI \n";
-                } else {
-                    errs() << " !!! we canNOT move this instr inside MPI \n";
-                }
-              }
-              //errs() << "~~~~instructions in the followings bbs \n";
-              // move on to instructions in the following basic blocks
-              for (Function::iterator hoist_b = std::next(bb, 1), hoist_be = Func.end(); hoist_b != hoist_be; ++hoist_b) {
-                BasicBlock *hoist_BB = &(*hoist_b);
-  	            for (BasicBlock::iterator hoist_i = hoist_BB->begin(), hoist_e = hoist_BB->end(); hoist_i != hoist_e; ++hoist_i) {
-                  errs() << "     instr after MPI Wait: " << *hoist_i << "\n";
-                  ableToMoveIntoComm(hoist_i, send_recv_instr, mpi_buf_name);
-                }
-              }
+              // go through instructions after the call to MPI_Wait
+              iterateThruLaterInstr(bb, i, Func, send_recv_instr, mpi_buf_name);
               // clear states that tracks the current send/recv-wait pair
               send_recv_instr = nullptr;
               mpi_buf_name = "";
@@ -75,7 +58,6 @@ namespace {
                 // the first argument of Isend, the buffer to send
                 Value *buf_arg = send_recv_instr->getArgOperand(0);
                 BitCastInst *bitcast_instr = dyn_cast<BitCastInst>(buf_arg);
-                //errs() << " the bitcast instr for arg 1 is: " << *bitcast_instr  << "\n";
                 buf_arg = bitcast_instr->getOperand(0); // this should be the name of the buffer
                 errs() << " the buffer name is (number): " << buf_arg->getName()  << "\n";
                 mpi_buf_name = buf_arg->getName();
@@ -93,11 +75,42 @@ namespace {
   };
 }
 
+// iterate through instructions after instruction i in basic block bb. 
+// check if any instructions can be moved into the current MPI window
+static void iterateThruLaterInstr(Function::iterator bb, 
+                                  BasicBlock::iterator i, 
+                                  Function &Func,
+                                  CallInst *send_recv_instr,
+                                  StringRef mpi_buf_name) {
+  for (BasicBlock::iterator hoist_i = std::next(i, 1), hoist_e = bb->end(); hoist_i != hoist_e; ++hoist_i) {
+    //if (isa<BranchInst>(hoist_i) || isa<CallInst>(hoist_i) ) {
+    //  // if we reach a branch or function call, stop looking. 
+    //  return;
+    //}
+    errs() << "     instr after MPI Wait: " << *hoist_i << "\n";
+    if (ableToMoveIntoComm(hoist_i, send_recv_instr, mpi_buf_name)) {
+        //Instruction* HoistPoint = BB.getTerminator();
+        //ii->moveBefore(HoistPoint);
+        //modified = true;
+        errs() << " !!! we can move this instr inside MPI \n";
+    } else {
+        errs() << " !!! we canNOT move this instr inside MPI \n";
+    }
+  }
+  // move on to instructions in the following basic blocks
+  for (Function::iterator hoist_b = std::next(bb, 1), hoist_be = Func.end(); hoist_b != hoist_be; ++hoist_b) {
+    BasicBlock *hoist_BB = &(*hoist_b);
+    for (BasicBlock::iterator hoist_i = hoist_BB->begin(), hoist_e = hoist_BB->end(); hoist_i != hoist_e; ++hoist_i) {
+      errs() << "     instr after MPI Wait: " << *hoist_i << "\n";
+      ableToMoveIntoComm(hoist_i, send_recv_instr, mpi_buf_name);
+    }
+  }
+}
 // mpi_buf_name: the buffer name used in previous MPI_Isend/Irecv call. 
 static bool ableToMoveIntoComm(BasicBlock::iterator instrToMove,
-                               CallInst *send_recv_inst,
+                               CallInst *send_recv_instr,
                                StringRef mpi_buf_name) {
-  StringRef mpi_call_name = send_recv_inst->getCalledFunction()->getName();
+  StringRef mpi_call_name = send_recv_instr->getCalledFunction()->getName();
   //errs() << "  **** in able to move. This MPI wait correspond to the call " << mpi_call_name << "\n";
 
   if (mpi_call_name == "MPI_Isend") {
@@ -126,12 +139,12 @@ static bool ableToMoveIntoComm(BasicBlock::iterator instrToMove,
   return false;
 
   //unsigned cur_arg = 0;
-  //unsigned num_args = send_recv_inst->arg_size();
+  //unsigned num_args = send_recv_instr->arg_size();
   //while(cur_arg != num_args) {
-  //    Value *arg_val = send_recv_inst->getArgOperand(cur_arg);
+  //    Value *arg_val = send_recv_instr->getArgOperand(cur_arg);
   //    cur_arg++;
   //}
-  //for (auto arg_i = send_recv_inst->arg_begin(), arg_e = send_recv_inst->arg_end(); arg_i != arg_e; ++arg_i) {
+  //for (auto arg_i = send_recv_instr->arg_begin(), arg_e = send_recv_instr->arg_end(); arg_i != arg_e; ++arg_i) {
   //}
 
   //unsigned cur_operand = 0;
