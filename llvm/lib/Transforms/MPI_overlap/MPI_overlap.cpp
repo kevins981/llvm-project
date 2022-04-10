@@ -97,17 +97,11 @@ static bool iterateThruLaterInstr(Function::iterator bb,
     Instruction *Inst = &(*hoist_i); // convert iterator to pointer
     hoist_i++; 
     errs() << "[DEBUG] Instruction after MPI Wait: " << *Inst << "\n";
-    //if (isa<BranchInst>(Inst) || isa<CallInst>(Inst) ) {
-    //if ( isa<CallInst>(Inst) ) {
-    //  errs() << "[DEBUG] Reached call instruction. Stop looking. \n";
-    //  return modified;
-    //}
     if (ableToMoveIntoComm(Inst, send_recv_instr, mpi_buf_name)) {
         // If ableToMoveIntoComm decides that we cannot move the next instruction
         // into the MPI window, stop looking further. This is to avoid breaking
         // existing dependencies within code regions after the MPI_Wait() call. 
         // If we were able to hoist the next instruction, keep looking.
-
 
         // move current instruction before MPI_Wait to expand compute window
         Inst->moveBefore(wait_instr);
@@ -124,8 +118,6 @@ static bool iterateThruLaterInstr(Function::iterator bb,
     for (BasicBlock::iterator hoist_i = hoist_BB->begin(), hoist_e = hoist_BB->end(); hoist_i != hoist_e;) {
       Instruction *Inst = &(*hoist_i); // convert iterator to pointer
       hoist_i++; 
-      //Instruction *Inst = std::next(hoist_i, 1);
-      //hoist_i++; 
       ableToMoveIntoComm(Inst, send_recv_instr, mpi_buf_name);
     }
   }
@@ -138,32 +130,12 @@ static bool ableToMoveIntoComm(Instruction *instrToMove,
   StringRef mpi_call_name = send_recv_instr->getCalledFunction()->getName();
   if (mpi_call_name == "MPI_Isend") {
     // does the current instruction reference mpi_buf_name, which was used in MPI_Isend?
-    // We currently only hoist loops that do not write to MPI buffer into the MPI region.
-
-    // Check if this instruction belongs to a loop
-    //bool part_of_loop = false;
-    //llvm::DominatorTree DT = llvm::DominatorTree();
-    //DT.recalculate(*(instrToMove->getFunction()));
-    //auto loopInfo = new llvm::LoopInfoBase<llvm::BasicBlock, llvm::Loop>();
-    //loopInfo->releaseMemory();
-    //loopInfo->analyze(DT);
-    //for (auto loop : *loopInfo) {
-    //    if (loop->contains(instrToMove)) {
-    //        part_of_loop = true;
-    //    }
-    //}
-    //if (part_of_loop) {
-    //  errs() << "[DEBUG] This instruction is a part of a loop. \n";
-    //}
-
-
     // if the curr instr is store AND the second operand is mpi_buf, then cannot move.
     // otherwise, we can move this instr before the MPI_Wait
     if (isa<StoreInst>(instrToMove)) {
       Value *arr_arg = instrToMove->getOperand(1);
       GetElementPtrInst *gep_instr = nullptr;
       if (gep_instr = dyn_cast<GetElementPtrInst>(arr_arg)) {
-        //errs() << "  !! found gep instr in store instr: " << *gep_instr << "\n";
         // if the destination of the store instruction is from a gep instruction
         arr_arg = gep_instr->getOperand(0); // get the first argument of gep instr
         if (arr_arg->getName() == mpi_buf_name) {
@@ -174,27 +146,7 @@ static bool ableToMoveIntoComm(Instruction *instrToMove,
     }
     return true;
   }
-
-
-
   return false;
-
-  //unsigned cur_arg = 0;
-  //unsigned num_args = send_recv_instr->arg_size();
-  //while(cur_arg != num_args) {
-  //    Value *arg_val = send_recv_instr->getArgOperand(cur_arg);
-  //    cur_arg++;
-  //}
-  //for (auto arg_i = send_recv_instr->arg_begin(), arg_e = send_recv_instr->arg_end(); arg_i != arg_e; ++arg_i) {
-  //}
-
-  //unsigned cur_operand = 0;
-  //unsigned num_operands = instrToMove->getNumOperands();
-  //while(cur_operand != num_operands) {
-  //    Value *operand_val = instrToMove->getOperand(cur_operand);
-  //    errs() << "         instrToMove operand " << cur_operand << ": " << *operand_val << "\n";
-  //    cur_operand++;
-  //}
 }
 
 char MPI_overlap::ID = 0;
