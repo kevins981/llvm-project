@@ -57,8 +57,8 @@ namespace {
                 send_recv_instr = dyn_cast<CallInst>(ii);
                 // the first argument of Isend, the buffer to send
                 Value *buf_arg = send_recv_instr->getArgOperand(0);
-                BitCastInst *bitcast_instr = dyn_cast<BitCastInst>(buf_arg);
-                buf_arg = bitcast_instr->getOperand(0); // this should be the name of the buffer
+                //BitCastInst *bitcast_instr = dyn_cast<BitCastInst>(buf_arg);
+                //buf_arg = bitcast_instr->getOperand(0); // this should be the name of the buffer
                 errs() << "[DEBUG] The MPI send buffer name is (number): " << buf_arg->getName()  << "\n";
                 mpi_buf_name = buf_arg->getName();
             }
@@ -68,8 +68,8 @@ namespace {
                 send_recv_instr = dyn_cast<CallInst>(ii);
                 // the first argument of Irecv, the buffer to write to
                 Value *buf_arg = send_recv_instr->getArgOperand(0);
-                BitCastInst *bitcast_instr = dyn_cast<BitCastInst>(buf_arg);
-                buf_arg = bitcast_instr->getOperand(0); // this should be the name of the buffer
+                //BitCastInst *bitcast_instr = dyn_cast<BitCastInst>(buf_arg);
+                //buf_arg = bitcast_instr->getOperand(0); // this should be the name of the buffer
                 errs() << "[DEBUG] The MPI recv buffer name is (number): " << buf_arg->getName()  << "\n";
                 mpi_buf_name = buf_arg->getName();
             }
@@ -96,6 +96,18 @@ static bool iterateThruLaterInstr(Function::iterator bb,
     // Even if Inst is moved, we can still procced as usual with hoist_i
     Instruction *Inst = &(*hoist_i); // convert iterator to pointer
     hoist_i++; 
+    if (isa<BranchInst>(*Inst)) {
+      errs() << "[DEBUG] Found branch instruction. Do not hoist and stop looking. " << "\n";
+      return modified;
+    }
+    if(isa<CallInst>(Inst)) { // check if this instruction is an instance of CallInst
+      auto callinst = dyn_cast<CallInst>(Inst);
+      StringRef call_func_name = callinst->getCalledFunction()->getName();
+      if (call_func_name == "clock_gettime") {
+        errs() << "[DEBUG] Found hard coded clock_gettime call. Stop looking." << "\n";
+        return modified;
+      }
+    }
     errs() << "[DEBUG] Instruction after MPI Wait: " << *Inst << "\n";
     if (ableToMoveIntoComm(Inst, send_recv_instr, mpi_buf_name)) {
         // If ableToMoveIntoComm decides that we cannot move the next instruction
